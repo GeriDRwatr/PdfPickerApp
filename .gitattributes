@@ -1,0 +1,9 @@
+# Auto-detect text files and convert to LF on Linux/Mac
+* text=auto
+
+# Shell scripts — always LF (required for Linux execution)
+*.sh text eol=lf
+linux/AppRun text eol=lf
+
+# Windows-specific files — always CRLF
+*.iss text eol=crlf

@@ -1,0 +1,3 @@
+# Runtime dependencies (required to run or build PdfPickerApp on Linux)
+PySide6
+PyMuPDF

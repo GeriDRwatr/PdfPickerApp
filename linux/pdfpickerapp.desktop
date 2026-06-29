@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=PdfPickerApp
+GenericName=PDF Viewer
+Comment=View PDFs and split or merge pages into separate documents
+Exec=pdfpickerapp %f
+Icon=pdfpickerapp
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/pdf;
+StartupWMClass=PdfPickerApp
+Keywords=pdf;viewer;split;merge;pages;

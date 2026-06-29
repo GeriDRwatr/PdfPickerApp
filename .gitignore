@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# PyInstaller build artifacts
+build/
+dist/
+
+# Installer output
+installer_output/
+
+# Distribution archives
+*.zip
+*.tar.gz
+*.exe
+
+# Local state / user-specific
+window_state.json
+
+# Test / sample PDF files
+*.pdf
+
+# IDE / OS
+.claude/
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+.DS_Store

@@ -1,5 +1,4 @@
 import os
-import sys
 from PySide6 import QtWidgets, QtCore, QtGui
 from .theme import THEME_MGR
 
@@ -145,6 +144,14 @@ class WordEditor(QtWidgets.QWidget):
     def _load(self, path: str):
         if not HAS_DOCX:
             self._no_docx_error()
+            return
+        if path.lower().endswith(".doc") and not path.lower().endswith(".docx"):
+            QtWidgets.QMessageBox.warning(
+                self, "Непідтримуваний формат",
+                "Старий формат .doc не підтримується.\n"
+                "Відкрийте файл у Microsoft Word або LibreOffice і збережіть як .docx, "
+                "потім спробуйте знову."
+            )
             return
         try:
             doc = DocxDocument(path)
@@ -343,7 +350,7 @@ class WordEditor(QtWidgets.QWidget):
 
     def _on_open(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Відкрити Word документ", "", "Word files (*.docx *.doc)"
+            self, "Відкрити Word документ", "", "Word files (*.docx)"
         )
         if path:
             self._load(path)
@@ -449,31 +456,41 @@ class WordEditor(QtWidgets.QWidget):
             return
 
         try:
-            if sys.platform == "win32":
-                try:
-                    import docx2pdf
-                    docx2pdf.convert(self._path, out)
-                except ImportError:
-                    self._qt_print_to_pdf(out)
-                    return
+            if self._convert_via_libreoffice(out) or self._convert_via_docx2pdf(out):
+                pass
             else:
-                import subprocess
-                r = subprocess.run(
-                    ["libreoffice", "--headless", "--convert-to", "pdf",
-                     "--outdir", os.path.dirname(os.path.abspath(out)), self._path],
-                    capture_output=True, timeout=60,
-                )
-                if r.returncode != 0:
-                    raise RuntimeError(r.stderr.decode(errors="replace"))
-                lo = os.path.join(
-                    os.path.dirname(os.path.abspath(out)),
-                    os.path.splitext(os.path.basename(self._path))[0] + ".pdf",
-                )
-                if os.path.abspath(lo) != os.path.abspath(out) and os.path.exists(lo):
-                    os.replace(lo, out)
+                self._qt_print_to_pdf(out)
             QtWidgets.QMessageBox.information(self, "PDF", f"Збережено:\n{out}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Помилка конвертування", f"{e}")
+
+    def _convert_via_libreoffice(self, out: str) -> bool:
+        import subprocess
+        try:
+            r = subprocess.run(
+                ["libreoffice", "--headless", "--convert-to", "pdf",
+                 "--outdir", os.path.dirname(os.path.abspath(out)), self._path],
+                capture_output=True, timeout=60,
+            )
+            if r.returncode != 0:
+                return False
+            lo = os.path.join(
+                os.path.dirname(os.path.abspath(out)),
+                os.path.splitext(os.path.basename(self._path))[0] + ".pdf",
+            )
+            if os.path.abspath(lo) != os.path.abspath(out) and os.path.exists(lo):
+                os.replace(lo, out)
+            return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
+    def _convert_via_docx2pdf(self, out: str) -> bool:
+        try:
+            import docx2pdf
+            docx2pdf.convert(self._path, out)
+            return True
+        except ImportError:
+            return False
 
     def _qt_print_to_pdf(self, path: str):
         from PySide6.QtPrintSupport import QPrinter

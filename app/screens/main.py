@@ -656,8 +656,8 @@ class ScreenMain(QtWidgets.QWidget):
         # Word drop zone (shown when no Word file is open yet)
         self._word_drop_zone = DropZone(
             hint_text="Відкрити Word\nПеретягни .docx або натисни, щоб вибрати",
-            extensions=(".docx", ".doc"),
-            dialog_filter="Word files (*.docx *.doc)",
+            extensions=(".docx",),
+            dialog_filter="Word files (*.docx)",
         )
         self._word_drop_zone.file_chosen.connect(self._on_word_file_chosen)
         self._stack.addWidget(self._word_drop_zone)
@@ -862,7 +862,7 @@ class ScreenMain(QtWidgets.QWidget):
 
     def _on_open_word(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Відкрити Word документ", "", "Word files (*.docx *.doc)"
+            self, "Відкрити Word документ", "", "Word files (*.docx)"
         )
         if path:
             self._open_word_path(path)

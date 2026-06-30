@@ -7,6 +7,7 @@ _ICON_NAMES = frozenset([
     "plus_circle", "play", "arrow_left", "arrow_up", "checkmark", "xmark", "eye", "save",
     "printer", "sidebar", "search",
     "info", "share", "markup", "a_circle",
+    "zoom_in", "zoom_out",
 ])
 
 _SF_FAMILY = None
@@ -83,24 +84,29 @@ def draw(p: QtGui.QPainter, rect: QtCore.QRectF,
                    QtCore.QPointF(rx - ah, cy + ah * 0.60))
 
     elif name == "rotate":
-        # SF "arrow.clockwise": arc with arrowhead
-        r_a = s * 0.265
-        arc_rect = QtCore.QRectF(cx - r_a, cy - r_a, r_a * 2, r_a * 2)
-        path = QtGui.QPainterPath()
-        path.arcMoveTo(arc_rect, 90)
-        path.arcTo(arc_rect, 90, -300)
-        p.drawPath(path)
-        # Arrowhead at arc end (Qt -210° ≡ 150° → screen upper-left)
-        ea = math.radians(150)
-        ex = cx + r_a * math.cos(ea)
-        ey = cy - r_a * math.sin(ea)
-        tx =  math.cos(math.radians(60))
-        ty = -math.sin(math.radians(60))
-        ah = s * 0.115
-        p.drawLine(QtCore.QPointF(ex, ey),
-                   QtCore.QPointF(ex - tx*ah + ty*ah*0.55, ey - ty*ah - tx*ah*0.55))
-        p.drawLine(QtCore.QPointF(ex, ey),
-                   QtCore.QPointF(ex - tx*ah - ty*ah*0.55, ey - ty*ah + tx*ah*0.55))
+        # SF "rotate.right": small rounded page rect + clockwise arc with arrowhead
+        pw = s * 0.22
+        ph = s * 0.27
+        rx_ = cx - pw - s * 0.07
+        ry_ = cy - ph
+        p.drawRoundedRect(QtCore.QRectF(rx_, ry_, pw * 2, ph * 2), 3, 3)
+        # Clockwise arc pinned to the top-right area of the page
+        arc_cx = rx_ + pw * 2 + s * 0.035
+        arc_cy = ry_ - s * 0.02
+        ar = s * 0.215
+        arc_rect = QtCore.QRectF(arc_cx - ar, arc_cy - ar, ar * 2, ar * 2)
+        arc_path = QtGui.QPainterPath()
+        arc_path.arcMoveTo(arc_rect, 180)
+        arc_path.arcTo(arc_rect, 180, -260)
+        p.drawPath(arc_path)
+        # Arrowhead: end angle = 180−260 = −80° → Qt 280° → bottom-right quadrant
+        ea = math.radians(80)   # 360−280=80 in standard math, but Qt y-flipped
+        ex = arc_cx + ar * math.cos(math.radians(-80))
+        ey = arc_cy - ar * math.sin(math.radians(-80))
+        ah = s * 0.10
+        # Tangent at −80° (clockwise) points mostly downward
+        p.drawLine(QtCore.QPointF(ex, ey), QtCore.QPointF(ex - ah * 0.9, ey - ah * 0.5))
+        p.drawLine(QtCore.QPointF(ex, ey), QtCore.QPointF(ex + ah * 0.3, ey - ah))
 
     elif name == "compress_layers":
         # SF "line.3.horizontal.decrease": three bars + side compression arrow
@@ -313,43 +319,60 @@ def draw(p: QtGui.QPainter, rect: QtCore.QRectF,
                    QtCore.QPointF(cx, cy + r * 0.55))
 
     elif name == "share":
-        # SF "square.and.arrow.up": open-top box + upward arrow from center
-        bw   = s * 0.26
-        top  = cy + s * 0.03
-        bot  = cy + s * 0.33
-        p.drawLine(QtCore.QPointF(cx - bw, top),  QtCore.QPointF(cx - bw, bot))
-        p.drawLine(QtCore.QPointF(cx - bw, bot),  QtCore.QPointF(cx + bw, bot))
-        p.drawLine(QtCore.QPointF(cx + bw, bot),  QtCore.QPointF(cx + bw, top))
-        ay1 = cy - s * 0.31
-        ay0 = top
+        # SF "square.and.arrow.up": rounded open-top box + upward arrow
+        bw   = s * 0.25
+        top  = cy + s * 0.02
+        bot  = cy + s * 0.31
+        r_c  = 3.5
+        # Left side + bottom-left corner + bottom + bottom-right corner + right side
+        p.drawLine(QtCore.QPointF(cx - bw, top),        QtCore.QPointF(cx - bw, bot - r_c))
+        p.drawArc(QtCore.QRectF(cx - bw, bot - r_c*2, r_c*2, r_c*2), 180*16, 90*16)
+        p.drawLine(QtCore.QPointF(cx - bw + r_c, bot),  QtCore.QPointF(cx + bw - r_c, bot))
+        p.drawArc(QtCore.QRectF(cx + bw - r_c*2, bot - r_c*2, r_c*2, r_c*2), 270*16, 90*16)
+        p.drawLine(QtCore.QPointF(cx + bw, bot - r_c),  QtCore.QPointF(cx + bw, top))
+        # Arrow up from center
+        ay1 = cy - s * 0.30
+        ay0 = cy - s * 0.06
         p.drawLine(QtCore.QPointF(cx, ay0), QtCore.QPointF(cx, ay1))
-        ah = s * 0.12
+        ah = s * 0.115
         p.drawLine(QtCore.QPointF(cx, ay1), QtCore.QPointF(cx - ah, ay1 + ah))
         p.drawLine(QtCore.QPointF(cx, ay1), QtCore.QPointF(cx + ah, ay1 + ah))
 
     elif name == "markup":
-        # SF "pencil": slanted pencil body with pointed tip + flat eraser end
-        import math as _m
-        angle = _m.radians(45)
-        l = s * 0.30
-        dx, dy = l * _m.cos(angle), l * _m.sin(angle)
-        tip = QtCore.QPointF(cx - dx, cy + dy)
-        top = QtCore.QPointF(cx + dx, cy - dy)
-        perp_dx, perp_dy = dy * 0.14, dx * 0.14
-        p.drawLine(QtCore.QPointF(tip.x() + perp_dx, tip.y() - perp_dy),
-                   QtCore.QPointF(top.x() + perp_dx, top.y() - perp_dy))
-        p.drawLine(QtCore.QPointF(tip.x() - perp_dx, tip.y() + perp_dy),
-                   QtCore.QPointF(top.x() - perp_dx, top.y() + perp_dy))
-        p.drawLine(top, QtCore.QPointF(top.x() - perp_dx * 2, top.y() + perp_dy * 2))
-        p.drawLine(top, QtCore.QPointF(top.x() + perp_dx * 2, top.y() - perp_dy * 2))
+        # SF "pencil.and.underline": diagonal pencil shaft + pointed tip + underline
+        a    = math.radians(43)
+        l    = s * 0.26
+        pw   = s * 0.053        # half-width of shaft
+        cos_a, sin_a = math.cos(a), math.sin(a)
+        perp_x, perp_y = -sin_a * pw, cos_a * pw   # perpendicular unit × pw
+        # Pencil body center, slightly up-right
+        pcx, pcy = cx + s * 0.04, cy - s * 0.06
+        tip = QtCore.QPointF(pcx - cos_a * l, pcy + sin_a * l)    # bottom-left (tip)
+        top = QtCore.QPointF(pcx + cos_a * l, pcy - sin_a * l)    # top-right (eraser)
+        # Two parallel shaft sides
+        p.drawLine(QtCore.QPointF(tip.x() + perp_x,  tip.y() + perp_y),
+                   QtCore.QPointF(top.x() + perp_x,  top.y() + perp_y))
+        p.drawLine(QtCore.QPointF(tip.x() - perp_x,  tip.y() - perp_y),
+                   QtCore.QPointF(top.x() - perp_x,  top.y() - perp_y))
+        # Flat eraser cap
+        p.drawLine(QtCore.QPointF(top.x() + perp_x,  top.y() + perp_y),
+                   QtCore.QPointF(top.x() - perp_x,  top.y() - perp_y))
+        # Filled pointed tip triangle
         tip_path = QtGui.QPainterPath()
-        tip_path.moveTo(tip)
-        tip_path.lineTo(tip.x() + perp_dx, tip.y() - perp_dy)
-        tip_path.lineTo(tip.x() - perp_dx, tip.y() + perp_dy)
+        tip_path.moveTo(QtCore.QPointF(tip.x() + perp_x, tip.y() + perp_y))
+        tip_path.lineTo(QtCore.QPointF(tip.x() - perp_x, tip.y() - perp_y))
+        tip_pt = QtCore.QPointF(tip.x() - cos_a * pw * 1.4,
+                                tip.y() + sin_a * pw * 1.4)
+        tip_path.lineTo(tip_pt)
         tip_path.closeSubpath()
         p.setBrush(color)
         p.setPen(QtCore.Qt.NoPen)
         p.drawPath(tip_path)
+        # Underline baseline
+        p.setPen(pen)
+        uly = cy + s * 0.30
+        ulw = s * 0.26
+        p.drawLine(QtCore.QPointF(cx - ulw, uly), QtCore.QPointF(cx + ulw, uly))
 
     elif name == "a_circle":
         # SF "a.circle": circle outline + capital "A" inside
@@ -362,5 +385,30 @@ def draw(p: QtGui.QPainter, rect: QtCore.QRectF,
         p.setPen(color)
         p.drawText(QtCore.QRectF(cx - r, cy - r, r * 2, r * 2),
                    QtCore.Qt.AlignCenter, "A")
+
+    elif name == "zoom_out":
+        # SF "minus.magnifyingglass": lens circle + diagonal handle + minus bar
+        r   = s * 0.235
+        gcx = cx - s * 0.062
+        gcy = cy - s * 0.062
+        p.drawEllipse(QtCore.QPointF(gcx, gcy), r, r)
+        hx0 = gcx + r * 0.715
+        hy0 = gcy + r * 0.715
+        p.drawLine(QtCore.QPointF(hx0, hy0), QtCore.QPointF(cx + s * 0.31, cy + s * 0.31))
+        mw = r * 0.60
+        p.drawLine(QtCore.QPointF(gcx - mw, gcy), QtCore.QPointF(gcx + mw, gcy))
+
+    elif name == "zoom_in":
+        # SF "plus.magnifyingglass": lens circle + diagonal handle + plus sign
+        r   = s * 0.235
+        gcx = cx - s * 0.062
+        gcy = cy - s * 0.062
+        p.drawEllipse(QtCore.QPointF(gcx, gcy), r, r)
+        hx0 = gcx + r * 0.715
+        hy0 = gcy + r * 0.715
+        p.drawLine(QtCore.QPointF(hx0, hy0), QtCore.QPointF(cx + s * 0.31, cy + s * 0.31))
+        mw = r * 0.55
+        p.drawLine(QtCore.QPointF(gcx - mw, gcy), QtCore.QPointF(gcx + mw, gcy))
+        p.drawLine(QtCore.QPointF(gcx, gcy - mw), QtCore.QPointF(gcx, gcy + mw))
 
     p.restore()

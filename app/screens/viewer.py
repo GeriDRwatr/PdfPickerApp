@@ -394,8 +394,11 @@ class _ToolbarButton(_HoverMixin, QtWidgets.QAbstractButton):
         color = QtGui.QColor(t.nav_icon_inactive_color)
         if not enabled:
             color.setAlpha(int(t.nav_icon_inactive_alpha * 0.35))
+        elif self._hover:
+            color.setAlpha(t.nav_icon_active_alpha)
         else:
-            color.setAlpha(t.nav_icon_active_alpha if self._hover else t.nav_icon_inactive_alpha)
+            # Toolbar icons need ~30% more contrast than sidebar nav buttons
+            color.setAlpha(min(255, t.nav_icon_inactive_alpha + 55))
         icon_cx = (r.center().x() - 6) if self._chevron else r.center().x()
         if self._is_icon:
             sz = t.icon_size
@@ -820,17 +823,17 @@ class ScreenViewer(QtWidgets.QWidget):
 
         tbl.addSpacing(4)
 
-        zoom_out_btn = _ToolbarButton("−", is_icon=False)
+        zoom_out_btn = _ToolbarButton("zoom_out")
         zoom_out_btn.setToolTip("Зменшити")
         zoom_out_btn.clicked.connect(self._zoom_out)
         tbl.addWidget(zoom_out_btn)
 
         self._lbl_zoom = QtWidgets.QLabel("100%")
-        self._lbl_zoom.setFixedWidth(48)
+        self._lbl_zoom.setFixedWidth(44)
         self._lbl_zoom.setAlignment(QtCore.Qt.AlignCenter)
         tbl.addWidget(self._lbl_zoom)
 
-        zoom_in_btn = _ToolbarButton("+", is_icon=False)
+        zoom_in_btn = _ToolbarButton("zoom_in")
         zoom_in_btn.setToolTip("Збільшити")
         zoom_in_btn.clicked.connect(self._zoom_in)
         tbl.addWidget(zoom_in_btn)

@@ -546,7 +546,7 @@ class ScreenMain(QtWidgets.QWidget):
         self._drop_zone.file_chosen.connect(self._on_file_chosen)
         self._stack.addWidget(self._drop_zone)
 
-        # PDF viewer — Chrome-like tabs, one per open PDF
+        # PDF viewer — browser-style tabs, one per open PDF
         self._viewer_tabs = PdfViewerTabs()
         self._viewer_tabs.all_closed.connect(self._on_new_file)
         self._stack.addWidget(self._viewer_tabs)

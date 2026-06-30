@@ -589,7 +589,7 @@ class ScreenViewer(QtWidgets.QWidget):
             self._render_pages()
 
 
-# ── Tabbed viewer (Chrome-style tabs, one per open PDF) ────────────────────────
+# ── Tabbed viewer (browser-style tabs, one per open PDF) ───────────────────────
 
 def _blend(c1: QtGui.QColor, c2: QtGui.QColor, t: float) -> QtGui.QColor:
     t = max(0.0, min(1.0, t))
@@ -600,7 +600,7 @@ def _blend(c1: QtGui.QColor, c2: QtGui.QColor, t: float) -> QtGui.QColor:
     )
 
 
-class _ChromeTabBar(QtWidgets.QTabBar):
+class _FileTabBar(QtWidgets.QTabBar):
     """Fully custom-painted tab bar — bypasses the native Windows style entirely
     (it ignores most QSS on QTabBar), matching the rest of the app's
     custom-painted widgets (NavButton, DropZone, ...).
@@ -608,7 +608,7 @@ class _ChromeTabBar(QtWidgets.QTabBar):
 
     _TAB_H      = 34
     _PREF_W     = 200   # natural width while there's room
-    _MIN_W      = 64    # floor width once tabs must squeeze to fit (Chrome-like)
+    _MIN_W      = 64    # floor width once tabs must squeeze to fit
     _PLUS_W     = 30
     _RADIUS     = 8
     _PAD_L      = 12
@@ -622,7 +622,7 @@ class _ChromeTabBar(QtWidgets.QTabBar):
         self.setMouseTracking(True)
         self.setExpanding(False)
         self.setDrawBase(False)
-        self.setMovable(False)   # we drive dragging ourselves for the Chrome-style overlap slide
+        self.setMovable(False)   # we drive dragging ourselves for the overlap slide effect
         self.setCursor(QtCore.Qt.PointingHandCursor)
         # native styles reserve a few px of margin around tabs beyond tabSizeHint,
         # which left a thin bar_bg sliver below the tab shapes — pin the bar's own
@@ -656,7 +656,7 @@ class _ChromeTabBar(QtWidgets.QTabBar):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # tab widths are a function of bar width (Chrome-like shrink-to-fit) — force relayout
+        # tab widths are a function of bar width (shrink-to-fit) — force relayout
         self.updateGeometry()
         self.update()
 
@@ -879,13 +879,12 @@ class _ChromeTabBar(QtWidgets.QTabBar):
 
 
 class PdfViewerTabs(QtWidgets.QWidget):
-    """Holds one ScreenViewer per open PDF, switchable via a Chrome-like tab bar.
+    """Holds one ScreenViewer per open PDF, switchable via a browser-style tab bar.
 
     The "+" control is a real, permanent last tab (no close button) rather than
-    a corner widget, so it sits flush against the last document tab like in
-    Chrome instead of floating at the far edge of the bar. The tab bar is
-    custom-painted (see _ChromeTabBar) since the native Windows style largely
-    ignores QSS on QTabBar.
+    a corner widget, so it sits flush against the last document tab instead of
+    floating at the far edge of the bar. The tab bar is custom-painted (see
+    _FileTabBar) since the native Windows style largely ignores QSS on QTabBar.
     """
 
     all_closed = QtCore.Signal()   # emitted when the last document tab is closed
@@ -898,10 +897,10 @@ class PdfViewerTabs(QtWidgets.QWidget):
         root.setSpacing(0)
 
         self._tabs = QtWidgets.QTabWidget()
-        self._tabs.setTabBar(_ChromeTabBar())
+        self._tabs.setTabBar(_FileTabBar())
         self._tabs.setDocumentMode(True)
         self._tabs.setTabsClosable(False)   # close glyph is custom-painted/hit-tested
-        # movability is set on the bar itself (_ChromeTabBar.__init__) — don't override it here
+        # movability is set on the bar itself (_FileTabBar.__init__) — don't override it here
         self._tabs.tabBar().tabCloseRequested.connect(self._close_tab)
         self._tabs.currentChanged.connect(self._on_current_changed)
         root.addWidget(self._tabs)

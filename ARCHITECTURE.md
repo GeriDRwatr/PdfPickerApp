@@ -16,7 +16,7 @@ Stack: **PySide6 + PyMuPDF (fitz)**. All UI custom-painted (paintEvent). No Qt D
 | `app/widgets.py` | All reusable thumbnail/card widgets (see Widgets section) |
 | `app/screens/main.py` | `ScreenMain` · `DropZone` · `NavButton` · `DrillDownPanel` · `ComingSoonWidget` |
 | `app/screens/merge.py` | `ScreenMergeMulti` — split/merge editor |
-| `app/screens/viewer.py` | `ScreenViewer` · `PageWidget` · `PdfViewerTabs` · `_ChromeTabBar` |
+| `app/screens/viewer.py` | `ScreenViewer` · `PageWidget` · `PdfViewerTabs` · `_FileTabBar` |
 | `app/screens/settings.py` | `ScreenSettings` · `_MiniPreview` — live theme editor (not wired into `ScreenMain` yet) |
 | `app/word_editor.py` | `WordEditor` — embedded .docx editor (workspace screen) |
 | `app/win_register.py` | `register_as_pdf_viewer()` · `set_title_bar_color()` — Windows-only; no-op elsewhere |
@@ -47,7 +47,7 @@ ScreenMain (QWidget)
 │
 ├── _stack  QStackedWidget  (workspace)
 │   ├── _drop_zone     DropZone()                 universal — any extension, no filter
-│   ├── _viewer_tabs   PdfViewerTabs               Chrome-style tabs, one per open PDF
+│   ├── _viewer_tabs   PdfViewerTabs               browser-style tabs, one per open PDF
 │   ├── _merge         ScreenMergeMulti            split/merge editor
 │   ├── _word_editor   WordEditor
 │   └── _coming_soon   ComingSoonWidget            unsupported formats (label set dynamically)
@@ -103,10 +103,10 @@ DropZone(
 # _accepts(path): True if extensions is None, else any(path.lower().endswith(ext) for ext in extensions)
 ```
 
-### PdfViewerTabs / _ChromeTabBar (app/screens/viewer.py)
+### PdfViewerTabs / _FileTabBar (app/screens/viewer.py)
 
-Chrome-style tabs, one `ScreenViewer` per open PDF. The tab bar is **fully
-custom-painted** (`_ChromeTabBar(QTabBar)`, overrides `paintEvent`/`tabSizeHint`/
+browser-style tabs, one `ScreenViewer` per open PDF. The tab bar is **fully
+custom-painted** (`_FileTabBar(QTabBar)`, overrides `paintEvent`/`tabSizeHint`/
 mouse events) instead of relying on QSS, because the native Windows style
 (`windows11`) mostly ignores stylesheet rules on `QTabBar` — confirmed by
 direct comparison: identical QSS rendered correctly in an automated/headless
@@ -116,7 +116,7 @@ run but as unstyled native "pill" tabs on a real interactive desktop session.
 ```
 PdfViewerTabs (QWidget)
 └── _tabs  QTabWidget (documentMode, tabsClosable=False — close glyph is custom-drawn)
-    └── tabBar() = _ChromeTabBar
+    └── tabBar() = _FileTabBar
         ├── real tab × N    one ScreenViewer each (setAcceptDrops(False) — adding
         │                   goes through "+" or the drop zone, not drag-onto-tab)
         └── "+" tab         tabData(idx) == "plus"; always the LAST tab (not a
@@ -177,7 +177,7 @@ inactive briefly ended up brighter than flat `bg_main`).
 
 `QTabWidget::pane` background is set to `viewer_bg` too (not `bg_main`) so
 there's no mismatched sliver between the tab bottom and the actual viewer.
-`_ChromeTabBar.setFixedHeight(_TAB_H)` is required — native styles otherwise
+`_FileTabBar.setFixedHeight(_TAB_H)` is required — native styles otherwise
 reserve a few px of margin beyond `tabSizeHint`, which left a thin `bar_bg`
 line between the tab shapes and the content below.
 

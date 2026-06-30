@@ -46,3 +46,27 @@ def register_as_pdf_viewer() -> None:
         ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
     except Exception:
         pass
+
+
+def set_title_bar_color(widget, hex_color: str) -> None:
+    """
+    Tint the native window title bar to match the app's theme background.
+    Windows 11 22H2+ only (DWM caption-color attribute); silently no-ops
+    on older Windows, other platforms, or any failure.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        hwnd = int(widget.winId())
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        colorref = r | (g << 8) | (b << 16)   # COLORREF is 0x00BBGGRR
+        DWMWA_CAPTION_COLOR = 35
+        value = ctypes.c_int(colorref)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_CAPTION_COLOR, ctypes.byref(value), ctypes.sizeof(value)
+        )
+    except Exception:
+        pass

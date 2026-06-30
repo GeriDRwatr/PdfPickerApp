@@ -591,10 +591,304 @@ class ScreenViewer(QtWidgets.QWidget):
 
 # ── Tabbed viewer (Chrome-style tabs, one per open PDF) ────────────────────────
 
-class PdfViewerTabs(QtWidgets.QWidget):
-    """Holds one ScreenViewer per open PDF, switchable via a Chrome-like tab bar."""
+def _blend(c1: QtGui.QColor, c2: QtGui.QColor, t: float) -> QtGui.QColor:
+    t = max(0.0, min(1.0, t))
+    return QtGui.QColor(
+        int(c1.red()   + (c2.red()   - c1.red())   * t),
+        int(c1.green() + (c2.green() - c1.green()) * t),
+        int(c1.blue()  + (c2.blue()  - c1.blue())  * t),
+    )
 
-    all_closed = QtCore.Signal()   # emitted when the last tab is closed
+
+class _ChromeTabBar(QtWidgets.QTabBar):
+    """Fully custom-painted tab bar — bypasses the native Windows style entirely
+    (it ignores most QSS on QTabBar), matching the rest of the app's
+    custom-painted widgets (NavButton, DropZone, ...).
+    """
+
+    _TAB_H      = 34
+    _PREF_W     = 200   # natural width while there's room
+    _MIN_W      = 64    # floor width once tabs must squeeze to fit (Chrome-like)
+    _PLUS_W     = 30
+    _RADIUS     = 8
+    _PAD_L      = 12
+    _CLOSE_SZ   = 14
+    _CLOSE_GAP  = 8
+    _PAD_R      = 10
+    _SWAP_OVERLAP = 0.60   # swap as soon as the dragged tab has covered this much of a neighbor
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.setExpanding(False)
+        self.setDrawBase(False)
+        self.setMovable(False)   # we drive dragging ourselves for the Chrome-style overlap slide
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        # native styles reserve a few px of margin around tabs beyond tabSizeHint,
+        # which left a thin bar_bg sliver below the tab shapes — pin the bar's own
+        # height so there's nothing left uncovered between tabs and the content below
+        self.setFixedHeight(self._TAB_H)
+        self._hover_progress: dict[int, float] = {}
+        self._hovered_index = -1
+        self._close_rects: dict[int, QtCore.QRect] = {}
+        self._anim_timer = QtCore.QTimer(self)
+        self._anim_timer.setInterval(16)
+        self._anim_timer.timeout.connect(self._tick)
+        self.tabMoved.connect(self._keep_plus_last)
+
+        self._drag_idx = -1
+        self._drag_offset = 0.0
+        self._press_x = 0.0
+
+    # ── sizing ────────────────────────────────────────────────────────────────
+
+    def _real_count(self) -> int:
+        return sum(1 for i in range(self.count()) if self.tabData(i) != "plus")
+
+    def tabSizeHint(self, index):
+        if self.tabData(index) == "plus":
+            return QtCore.QSize(self._PLUS_W, self._TAB_H)
+        n = self._real_count()
+        available = max(0, self.width() - self._PLUS_W)
+        even_w = available / n if n else self._PREF_W
+        w = max(self._MIN_W, min(self._PREF_W, even_w))
+        return QtCore.QSize(int(w), self._TAB_H)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # tab widths are a function of bar width (Chrome-like shrink-to-fit) — force relayout
+        self.updateGeometry()
+        self.update()
+
+    # ── keep the "+" tab pinned to the end when reordering ───────────────────
+
+    def _keep_plus_last(self, *_):
+        for i in range(self.count() - 1):
+            if self.tabData(i) == "plus":
+                self.moveTab(i, self.count() - 1)
+                break
+
+    # ── hover tracking / animation ───────────────────────────────────────────
+
+    def mouseMoveEvent(self, event):
+        pos = event.position().toPoint()
+        idx = self.tabAt(pos)
+        if idx != self._hovered_index:
+            self._hovered_index = idx
+            self._anim_timer.start()
+
+        if self._drag_idx != -1:
+            self._drag_offset = pos.x() - self._press_x
+            self._maybe_swap()
+            self._clamp_drag_offset()
+            self.update()
+            return
+        super().mouseMoveEvent(event)
+
+    def _clamp_drag_offset(self):
+        rect = self.tabRect(self._drag_idx)
+        left_bound = 0
+        right_bound = self.width() - self._PLUS_W
+        min_offset = left_bound - rect.x()
+        max_offset = right_bound - rect.right()
+        self._drag_offset = max(min_offset, min(max_offset, self._drag_offset))
+
+    def leaveEvent(self, event):
+        self._hovered_index = -1
+        self._anim_timer.start()
+        super().leaveEvent(event)
+
+    def _tick(self):
+        settled = True
+        for i in range(self.count()):
+            target = 1.0 if i == self._hovered_index else 0.0
+            cur = self._hover_progress.get(i, 0.0)
+            if abs(cur - target) > 0.01:
+                cur += (target - cur) * 0.35
+                self._hover_progress[i] = cur
+                settled = False
+            elif cur != target:
+                self._hover_progress[i] = target
+        self.update()
+        if settled:
+            self._anim_timer.stop()
+
+    # ── mouse press / release (close-button hit test + custom drag-reorder) ──
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            idx = self.tabAt(event.pos())
+            rect = self._close_rects.get(idx)
+            if rect and rect.contains(event.pos()) and self.tabData(idx) != "plus":
+                self.tabCloseRequested.emit(idx)
+                return
+            if idx != -1 and self.tabData(idx) != "plus":
+                self.setCurrentIndex(idx)
+                self._drag_idx = idx
+                self._press_x = event.position().toPoint().x()
+                self._drag_offset = 0.0
+                return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._drag_idx != -1:
+            self._drag_idx = -1
+            self._drag_offset = 0.0
+            self.update()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _tab_draw_rect(self, index: int) -> QtCore.QRect:
+        rect = self.tabRect(index)
+        if index == self._drag_idx and self._drag_offset:
+            rect = rect.translated(int(self._drag_offset), 0)
+        return rect
+
+    def _maybe_swap(self):
+        # _drag_offset is recomputed every move from (mouse_x - _press_x). After a swap the
+        # dragged tab's nominal slot jumps by the neighbor's width, so _press_x must absorb
+        # that jump too — otherwise next frame's offset is computed against a stale reference
+        # and the tab "teleports", cascading swaps all the way to one end of the bar.
+        cur = self._drag_idx
+        rect = self.tabRect(cur)
+        w = rect.width()
+        visual_left = rect.x() + self._drag_offset
+
+        if cur > 0 and self.tabData(cur - 1) != "plus":
+            left_rect = self.tabRect(cur - 1)
+            overlap = left_rect.right() - visual_left   # how far we've crossed into the left neighbor
+            if overlap > w * self._SWAP_OVERLAP:
+                shift = rect.x() - left_rect.x()
+                self.moveTab(cur, cur - 1)
+                self._drag_idx = cur - 1
+                self._drag_offset += shift
+                self._press_x -= shift
+                return
+
+        n_real = self._real_count()
+        if cur < n_real - 1:
+            right_rect = self.tabRect(cur + 1)
+            overlap = (visual_left + w) - right_rect.x()   # how far we've crossed into the right neighbor
+            if overlap > w * self._SWAP_OVERLAP:
+                shift = right_rect.x() - rect.x()
+                self.moveTab(cur, cur + 1)
+                self._drag_idx = cur + 1
+                self._drag_offset -= shift
+                self._press_x += shift
+                return
+
+    # ── painting ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _rounded_top_path(rect: QtCore.QRect, radius: int) -> QtGui.QPainterPath:
+        r = QtCore.QRectF(rect)
+        path = QtGui.QPainterPath()
+        path.moveTo(r.left(), r.bottom())
+        path.lineTo(r.left(), r.top() + radius)
+        path.quadTo(r.left(), r.top(), r.left() + radius, r.top())
+        path.lineTo(r.right() - radius, r.top())
+        path.quadTo(r.right(), r.top(), r.right(), r.top() + radius)
+        path.lineTo(r.right(), r.bottom())
+        path.closeSubpath()
+        return path
+
+    def _paint_tab_content(self, p: QtGui.QPainter, i: int, rect: QtCore.QRect,
+                            selected: bool, hover: float) -> None:
+        if self.tabData(i) == "plus":
+            alpha = 0.55 + 0.35 * hover
+            p.setPen(QtGui.QColor(255, 255, 255, int(255 * alpha)))
+            font = self.font()
+            font.setPixelSize(15)
+            font.setWeight(QtGui.QFont.DemiBold)
+            p.setFont(font)
+            p.drawText(rect, QtCore.Qt.AlignCenter, "+")
+            return
+
+        close_rect = QtCore.QRect(
+            rect.right() - self._PAD_R - self._CLOSE_SZ,
+            rect.center().y() - self._CLOSE_SZ // 2,
+            self._CLOSE_SZ, self._CLOSE_SZ,
+        )
+        self._close_rects[i] = close_rect
+
+        text_rect = QtCore.QRect(
+            rect.left() + self._PAD_L, rect.top(),
+            close_rect.left() - self._CLOSE_GAP - (rect.left() + self._PAD_L),
+            rect.height(),
+        )
+        text_alpha = 0.95 if selected else (0.80 + 0.15 * hover)
+        p.setPen(QtGui.QColor(255, 255, 255, int(255 * text_alpha)))
+        font = self.font()
+        font.setWeight(QtGui.QFont.DemiBold if selected else QtGui.QFont.Normal)
+        p.setFont(font)
+        fm = QtGui.QFontMetrics(font)
+        elided = fm.elidedText(self.tabText(i), QtCore.Qt.ElideRight, max(0, text_rect.width()))
+        p.drawText(text_rect, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, elided)
+
+        close_alpha = 0.85 if selected else (0.55 + 0.30 * hover)
+        pen = QtGui.QPen(QtGui.QColor(255, 255, 255, int(255 * close_alpha)), 1.4)
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        p.setPen(pen)
+        m = 4
+        cr = close_rect.adjusted(m, m, -m, -m)
+        p.drawLine(cr.topLeft(), cr.bottomRight())
+        p.drawLine(cr.topRight(), cr.bottomLeft())
+
+    def paintEvent(self, event):
+        t = THEME_MGR.get()
+        # bar/inactive sit a step above bg_sidebar but clearly below viewer_bg, so the active
+        # tab (flat viewer_bg — the actual color behind the page thumbnails) reads as the
+        # highlighted one and flows seamlessly into the document area beneath it
+        bar_bg = QtGui.QColor(t.bg_sidebar).lighter(115)
+        active_bg = QtGui.QColor(t.viewer_bg)
+        inactive_bg = bar_bg
+        hover_bg = QtGui.QColor(t.bg_sidebar).lighter(140)
+
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        p.fillRect(self.rect(), bar_bg)
+
+        selected_idx = self.currentIndex()
+        self._close_rects.clear()
+
+        # layers 1+2: every non-selected tab — background, then its own text/close — fully
+        # under the selected tab so nothing of theirs can show through it
+        for i in range(self.count()):
+            if i == selected_idx:
+                continue
+            rect = self._tab_draw_rect(i)
+            if not rect.isValid():
+                continue
+            hover = self._hover_progress.get(i, 0.0)
+            p.fillPath(self._rounded_top_path(rect, self._RADIUS), _blend(inactive_bg, hover_bg, hover))
+            self._paint_tab_content(p, i, rect, False, hover)
+
+        # layers 3+4: the selected (possibly dragged) tab, painted as one opaque unit on top
+        # of everything else — background bleeds into neighbors by one radius so its rounded
+        # corners overlap theirs (otherwise the two curves leave a notch of bar_bg showing
+        # through at the seam), and while dragging this rect is already offset, so the tab
+        # visually slides and fully covers whatever neighbor it overlaps (no see-through text)
+        if 0 <= selected_idx < self.count():
+            rect = self._tab_draw_rect(selected_idx)
+            if rect.isValid():
+                hover = self._hover_progress.get(selected_idx, 0.0)
+                bleed = rect.adjusted(-self._RADIUS, 0, self._RADIUS, 0)
+                p.fillPath(self._rounded_top_path(bleed, self._RADIUS), active_bg)
+                self._paint_tab_content(p, selected_idx, rect, True, hover)
+        p.end()
+
+
+class PdfViewerTabs(QtWidgets.QWidget):
+    """Holds one ScreenViewer per open PDF, switchable via a Chrome-like tab bar.
+
+    The "+" control is a real, permanent last tab (no close button) rather than
+    a corner widget, so it sits flush against the last document tab like in
+    Chrome instead of floating at the far edge of the bar. The tab bar is
+    custom-painted (see _ChromeTabBar) since the native Windows style largely
+    ignores QSS on QTabBar.
+    """
+
+    all_closed = QtCore.Signal()   # emitted when the last document tab is closed
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -604,82 +898,92 @@ class PdfViewerTabs(QtWidgets.QWidget):
         root.setSpacing(0)
 
         self._tabs = QtWidgets.QTabWidget()
+        self._tabs.setTabBar(_ChromeTabBar())
         self._tabs.setDocumentMode(True)
-        self._tabs.setTabsClosable(True)
-        self._tabs.tabCloseRequested.connect(self._close_tab)
+        self._tabs.setTabsClosable(False)   # close glyph is custom-painted/hit-tested
+        # movability is set on the bar itself (_ChromeTabBar.__init__) — don't override it here
+        self._tabs.tabBar().tabCloseRequested.connect(self._close_tab)
+        self._tabs.currentChanged.connect(self._on_current_changed)
         root.addWidget(self._tabs)
 
-        self._add_btn = QtWidgets.QToolButton()
-        self._add_btn.setText("+")
-        self._add_btn.setToolTip("Відкрити ще один PDF")
-        self._add_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self._add_btn.setAutoRaise(True)
-        self._add_btn.setFocusPolicy(QtCore.Qt.NoFocus)
-        self._add_btn.clicked.connect(self._on_add_clicked)
-        self._tabs.setCornerWidget(self._add_btn, QtCore.Qt.TopRightCorner)
+        self._add_plus_tab()
 
     # ── public API ────────────────────────────────────────────────────────────
 
     def add_tab(self, path: str):
-        for i in range(self._tabs.count()):
+        for i in range(self._plus_index()):
             if self._tabs.widget(i)._path == path:
                 self._tabs.setCurrentIndex(i)
                 return
         viewer = ScreenViewer()
-        viewer.setAcceptDrops(False)   # adding files goes through the "+" button / drop zone
+        viewer.setAcceptDrops(False)   # adding files goes through the "+" tab / drop zone
         viewer.load_pdf(path)
-        idx = self._tabs.addTab(viewer, os.path.basename(path))
+        idx = self._tabs.insertTab(self._plus_index(), viewer, os.path.basename(path))
         self._tabs.setTabToolTip(idx, path)
         self._tabs.setCurrentIndex(idx)
 
     def reset(self):
-        while self._tabs.count():
+        while self._tabs.count() > 1:   # keep the trailing "+" tab
             w = self._tabs.widget(0)
             self._tabs.removeTab(0)
             w.close_doc()
             w.deleteLater()
 
     def paths(self) -> list[str]:
-        return [self._tabs.widget(i)._path for i in range(self._tabs.count())]
+        return [self._tabs.widget(i)._path for i in range(self._plus_index())]
 
     def current_viewer(self) -> ScreenViewer | None:
-        return self._tabs.currentWidget()
+        w = self._tabs.currentWidget()
+        return w if isinstance(w, ScreenViewer) else None
 
     def apply_theme(self):
         t = THEME_MGR.get()
         self._tabs.setStyleSheet(f"""
-            QTabWidget::pane {{ border: none; background: {t.bg_main}; }}
-            QTabBar {{ background: {t.bg_sidebar}; }}
-            QTabBar::tab {{
-                background: {t.bg_sidebar};
-                color: rgba(255,255,255,0.6);
-                padding: 7px 14px;
+            QTabWidget::pane {{ border: none; background: {t.viewer_bg}; top: -1px; }}
+            QTabBar QToolButton {{
+                background: {t.bg_hover};
                 border: none;
-                border-right: 1px solid {t.bg_border};
+                border-radius: 5px;
+                min-width: 28px;
+                min-height: 28px;
+                margin: 2px 3px;
             }}
-            QTabBar::tab:selected {{
-                background: {t.bg_main};
-                color: rgba(255,255,255,0.95);
-            }}
-            QTabBar::tab:hover:!selected {{ background: {t.bg_hover}; }}
+            QTabBar QToolButton:hover {{ background: {t.bg_border}; }}
+            QTabBar QToolButton:pressed {{ background: {t.accent}; }}
+            QTabBar QToolButton::left-arrow {{ image: none; border-right: 6px solid white; border-top: 5px solid transparent; border-bottom: 5px solid transparent; width: 0; height: 0; }}
+            QTabBar QToolButton::right-arrow {{ image: none; border-left: 6px solid white; border-top: 5px solid transparent; border-bottom: 5px solid transparent; width: 0; height: 0; }}
         """)
-        self._add_btn.setStyleSheet(
-            "QToolButton { color: rgba(255,255,255,0.55); background: transparent;"
-            " border: none; font-size: 15px; padding: 4px 12px; }"
-            " QToolButton:hover { color: white; }"
-        )
-        for i in range(self._tabs.count()):
+        self._tabs.tabBar().update()
+        for i in range(self._plus_index()):
             self._tabs.widget(i).apply_theme()
 
     # ── internals ─────────────────────────────────────────────────────────────
 
+    def _plus_index(self) -> int:
+        return self._tabs.count() - 1
+
+    def _add_plus_tab(self):
+        idx = self._tabs.addTab(QtWidgets.QWidget(), "+")
+        self._tabs.setTabToolTip(idx, "Відкрити ще один PDF")
+        self._tabs.tabBar().setTabData(idx, "plus")
+
     def _close_tab(self, index: int):
+        if index == self._plus_index():
+            return
         w = self._tabs.widget(index)
         self._tabs.removeTab(index)
         w.close_doc()
         w.deleteLater()
-        if self._tabs.count() == 0:
+        if self._tabs.count() == 1:   # only the "+" tab is left
             self.all_closed.emit()
+
+    def _on_current_changed(self, index: int):
+        if index != self._plus_index() or self._tabs.count() <= 1:
+            return
+        self._tabs.blockSignals(True)
+        self._tabs.setCurrentIndex(index - 1)
+        self._tabs.blockSignals(False)
+        self._on_add_clicked()
 
     def _on_add_clicked(self):
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(

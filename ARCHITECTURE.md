@@ -8,18 +8,18 @@ Stack: **PySide6 + PyMuPDF (fitz)**. All UI custom-painted (paintEvent). No Qt D
 
 | File | Key class(es) / purpose |
 |---|---|
-| `main.py` | `QApplication` → `ScreenMain`; handles CLI PDF arg |
-| `theme.py` | `Theme` dataclass · `ThemeManager` · `THEME_MGR` singleton |
-| `constants.py` | `group_color(n)` reads THEME_MGR; fixed color constants |
-| `icons.py` | `draw(p,rect,name,color)` · `sf_font(px,w)` — stroke from THEME_MGR |
-| `pdf_utils.py` | `clear_layout` · `safe_thumbnail_render` |
-| `widgets.py` | All reusable thumbnail/card widgets (see Widgets section) |
-| `screen_main.py` | `ScreenMain` · `DropZone` · `NavButton` · `DrillDownPanel` |
-| `screen_merge.py` | `ScreenMergeMulti` — split/merge editor |
-| `screen_viewer.py` | `ScreenViewer` · `PageWidget` — PDF viewer + status bar |
-| `screen_settings.py` | `ScreenSettings` · `_MiniPreview` — live theme editor |
-| `word_editor.py` | `WordEditor` — embedded .docx editor (workspace screen) |
-| `win_register.py` | `register_as_pdf_viewer()` — Windows HKCU registry; no-op elsewhere |
+| `main.py` | `QApplication` (style=Fusion) → `ScreenMain`; handles CLI PDF arg |
+| `app/theme.py` | `Theme` dataclass · `ThemeManager` · `THEME_MGR` singleton |
+| `app/constants.py` | `group_color(n)` reads THEME_MGR; fixed color constants |
+| `app/icons.py` | `draw(p,rect,name,color)` · `sf_font(px,w)` — stroke from THEME_MGR |
+| `app/pdf_utils.py` | `clear_layout` · `safe_thumbnail_render` |
+| `app/widgets.py` | All reusable thumbnail/card widgets (see Widgets section) |
+| `app/screens/main.py` | `ScreenMain` · `DropZone` · `NavButton` · `DrillDownPanel` · `ComingSoonWidget` |
+| `app/screens/merge.py` | `ScreenMergeMulti` — split/merge editor |
+| `app/screens/viewer.py` | `ScreenViewer` · `PageWidget` · `PdfViewerTabs` · `_ChromeTabBar` |
+| `app/screens/settings.py` | `ScreenSettings` · `_MiniPreview` — live theme editor (not wired into `ScreenMain` yet) |
+| `app/word_editor.py` | `WordEditor` — embedded .docx editor (workspace screen) |
+| `app/win_register.py` | `register_as_pdf_viewer()` · `set_title_bar_color()` — Windows-only; no-op elsewhere |
 | `theme.json` | Saved theme overrides (created on first save) |
 | `window_state.json` | Saved window size |
 
@@ -34,82 +34,152 @@ Stack: **PySide6 + PyMuPDF (fitz)**. All UI custom-painted (paintEvent). No Qt D
 
 ---
 
-## Screen Layout (screen_main.py)
+## Screen Layout (app/screens/main.py)
+
+No left sidebar. The app starts on one universal drop zone; format is detected
+from the dropped file's extension, and the right sidebar becomes a format-aware
+tool panel (hidden entirely until a file is loaded).
 
 ```
 ScreenMain (QWidget)
 │
-├── _sidebar  QFrame  (left, 210px expanded / 62px collapsed)
-│   ├── _toggle_btn "☰  TDTool"         → _toggle_sidebar()
-│   ├── _left_panel  DrillDownPanel(on_folder_open=_expand_sidebar)
-│   │   ├── NavButton "PDF"  [folder]          → push sub-page + _expand_sidebar()
-│   │   │   sub-page:
-│   │   │   ├── ← PDF  (_BackHeader)
-│   │   │   ├── • Відкрити PDF                → _select("viewer")
-│   │   │   ├── • Розділити/Об'єднати PDF     → _select("editor")
-│   │   │   ├── • Конвертувати                → _select("convert")
-│   │   │   └── • Стиснути PDF                → _select("compress")
-│   │   └── NavButton "Word"  [folder]         → push sub-page + _expand_sidebar()
-│   │       clicked also → _select("word")     ← updates workspace/right-panel immediately
-│   │       sub-page:
-│   │       ├── ← Word  (_BackHeader)
-│   │       └── • Відкрити Word               → _on_open_word()
-│   ├── [divider]
-│   └── NavButton "?"  "Довідка"              → _merge._show_help()
+├── _top_gap  QFrame (8px)             — gap below the native title bar, bg_main colored
 │
 ├── _stack  QStackedWidget  (workspace)
-│   ├── _drop_zone          DropZone(pdf)          editor entry
-│   ├── _merge              ScreenMergeMulti
-│   ├── _viewer             ScreenViewer
-│   ├── _viewer_drop_zone   DropZone(pdf)          viewer entry
-│   ├── _word_editor        WordEditor
-│   ├── _word_drop_zone     DropZone(docx)         word entry
-│   └── ComingSoonWidget × 2  (convert, compress)
+│   ├── _drop_zone     DropZone()                 universal — any extension, no filter
+│   ├── _viewer_tabs   PdfViewerTabs               Chrome-style tabs, one per open PDF
+│   ├── _merge         ScreenMergeMulti            split/merge editor
+│   ├── _word_editor   WordEditor
+│   └── _coming_soon   ComingSoonWidget            unsupported formats (label set dynamically)
 │
-└── _right_sidebar  QFrame  (right, 210px / 62px collapsed)
+└── _right_sidebar  QFrame  (right, 210px / 62px collapsed; hidden when no file is open)
     ├── _right_toggle_btn "☰  Інструменти"
     └── _right_tool_stack  QStackedWidget
-        ├── [0] editor tools    (checkmark/xmark/save/plus_circle/arrow_left NavButtons)
-        ├── [1] viewer tools    DrillDownPanel — "Відкрити PDF" + "Друк документа" folder
-        └── [2] empty QWidget   (word, convert, compress, settings)
+        ├── [0] empty QWidget                      no file loaded
+        ├── [1] PDF tools     DrillDownPanel — Переглянути / Розділити-Об'єднати (folder,
+        │                     pulls ALL open tab paths into _merge) / Друк документа (folder)
+        │                     / Новий файл
+        ├── [2] Word tools    just "Новий файл" (WordEditor has its own toolbar)
+        └── [3] unsupported   just "Новий файл"
+    └── "?" Довідка (always visible, pinned below the tool stack) → _merge._show_help()
 ```
 
-### _select(key)
+### File-open dispatch
 
 ```python
-_PDF_KEYS = {"viewer", "editor", "convert", "compress"}
+_on_file_chosen(paths):
+  exts = {splitext(p)[1].lower() for p in paths}
+  {".pdf"}                    → _open_pdf_tabs(paths)   # 1 or many — always opens as tabs
+  {".docx"} and len(paths)==1 → _open_word(paths[0])
+  else                        → _open_unsupported(paths[0])
 
-"editor"   → right[0]; show _merge or _drop_zone
-"viewer"   → right[1]; show _viewer or _viewer_drop_zone
-"word"     → right[2]; show _word_editor (has_file()) or _word_drop_zone
-other key  → right[2]; show ComingSoonWidget
+_open_pdf_tabs(paths):
+  _current_format='pdf'; _pdf_scenario='viewer'
+  _viewer_tabs.reset(); add_tab(p) for each path
+  show _viewer_tabs; right_tool_stack→1; right_sidebar.setVisible(True)
 
-nav_btns["__pdf__"].set_active(key in _PDF_KEYS)
-nav_btns["__word__"].set_active(key == "word")
+_on_pdf_edit():            # "Розділити/Об'єднати PDF" in the right panel
+  for p in _viewer_tabs.paths(): if p not in _merge.files: _merge.add_file(p)
+  show _merge; _pdf_scenario='editor'
+
+_on_pdf_view():             # "Переглянути" — just switches back, tabs are untouched
+  show _viewer_tabs; _pdf_scenario='viewer'
+
+_on_new_file():              # "Новий файл" — also fired by PdfViewerTabs.all_closed
+  _merge.reset(); _viewer_tabs.reset(); _current_format='none'
+  show _drop_zone; right_tool_stack→0; right_sidebar.setVisible(False)
 ```
 
-### Sidebar collapse
+`open_in_viewer(path)` (OS file-association launch from `main.py`) just calls `_open_pdf_tabs([path])`.
 
-```python
-_expand_sidebar()           # called by DrillDownPanel.on_folder_open
-  if _collapsed: _toggle_sidebar()
-
-_toggle_sidebar()
-  animate minimumWidth: 210 ↔ 62  (220ms InOutCubic)
-  if collapsing: _left_panel.reset()   # back to main page
-```
-
-### DropZone (parameterizable)
+### DropZone (universal)
 
 ```python
 DropZone(
-    hint_text   = "Перетягни PDF сюди або натисни, щоб вибрати",
-    extensions  = (".pdf",),
-    dialog_filter = "PDF files (*.pdf)",
+    hint_text     = "Перетягни файл сюди або натисни, щоб вибрати",
+    extensions    = None,              # None = accept any extension
+    dialog_filter = "Усі файли (*)",
 )
-# Word drop zone uses: hint_text="Відкрити Word\nПеретягни .docx...", extensions=(".docx",)
-# _accepts(path) checks any(path.lower().endswith(ext) for ext in extensions)
+# _accepts(path): True if extensions is None, else any(path.lower().endswith(ext) for ext in extensions)
 ```
+
+### PdfViewerTabs / _ChromeTabBar (app/screens/viewer.py)
+
+Chrome-style tabs, one `ScreenViewer` per open PDF. The tab bar is **fully
+custom-painted** (`_ChromeTabBar(QTabBar)`, overrides `paintEvent`/`tabSizeHint`/
+mouse events) instead of relying on QSS, because the native Windows style
+(`windows11`) mostly ignores stylesheet rules on `QTabBar` — confirmed by
+direct comparison: identical QSS rendered correctly in an automated/headless
+run but as unstyled native "pill" tabs on a real interactive desktop session.
+`main.py` also sets `app.setStyle("Fusion")` as a belt-and-suspenders fallback.
+
+```
+PdfViewerTabs (QWidget)
+└── _tabs  QTabWidget (documentMode, tabsClosable=False — close glyph is custom-drawn)
+    └── tabBar() = _ChromeTabBar
+        ├── real tab × N    one ScreenViewer each (setAcceptDrops(False) — adding
+        │                   goes through "+" or the drop zone, not drag-onto-tab)
+        └── "+" tab         tabData(idx) == "plus"; always the LAST tab (not a
+                             QTabWidget cornerWidget — that left a gap before it)
+```
+
+```python
+add_tab(path):
+  if path already open: setCurrentIndex(that tab); return
+  ScreenViewer().load_pdf(path) → insertTab(at plus_index(), viewer, basename)
+reset():            remove every tab except the trailing "+" one; viewer.close_doc() each
+paths() -> list[str]
+current_viewer() -> ScreenViewer | None
+all_closed signal:  emitted from _close_tab() when only the "+" tab is left
+```
+
+**"+" tab as a real tab, not a corner widget** — `QTabWidget.setCornerWidget`
+anchors to the far edge of the whole bar, leaving a gap before it whenever tabs
+don't fill the width. Making "+" the actual last tab (`tabData == "plus"`, no
+close glyph) keeps it flush against the last document tab. Clicking it
+(`_on_current_changed`) reverts `currentIndex` to the previous tab and opens
+`QFileDialog.getOpenFileNames`.
+
+**Shrink-to-fit sizing** (`tabSizeHint`) — real tabs split the bar width evenly
+(`_PREF_W=200` cap, `_MIN_W=64` floor); recalculated on every `resizeEvent`.
+
+**Custom drag-reorder** (`setMovable(False)` — native QTabBar movable was
+replaced entirely for full visual control):
+```python
+mousePressEvent  → on a tab body: setCurrentIndex(idx); _drag_idx=idx; _press_x=mouse.x
+mouseMoveEvent   → _drag_offset = mouse.x - _press_x; _maybe_swap(); _clamp_drag_offset()
+_maybe_swap()    → swaps with a neighbor once the dragged tab has covered
+                   _SWAP_OVERLAP (0.60) of the neighbor's width.
+                   CRITICAL: must adjust _press_x by the same `shift` as
+                   _drag_offset after a swap — _drag_offset is recomputed from
+                   scratch every move as (mouse.x - _press_x), so leaving
+                   _press_x stale made the tab "teleport"/cascade-swap to one
+                   end of the bar on the very next move event.
+mouseReleaseEvent → clears _drag_idx/_drag_offset (no separate "drop" animation)
+```
+
+**Paint order** (`paintEvent`) — non-selected tabs (background + their own
+text/close) are painted first, **then** the selected/dragged tab is painted
+last as one opaque unit (background bled `±_RADIUS` into neighbors, then its
+own text/close). This two-phase order is required: drawing all backgrounds
+then all text in a single pass let a neighbor's text — drawn after the
+selected tab's background fill — show through on top of it during a drag.
+
+```python
+active_bg   = THEME_MGR.get().viewer_bg     # exact match to the page-thumbnail area
+                                             # → active tab visually "flows into" the document
+inactive_bg = bg_sidebar.lighter(115)       # a step above the bar itself (lighter(115) too)
+hover_bg    = bg_sidebar.lighter(140)
+```
+Brightness ordering matters: inactive/bar must stay clearly *below* `viewer_bg`
+or the active tab stops reading as "the highlighted one" (regressed once when
+inactive briefly ended up brighter than flat `bg_main`).
+
+`QTabWidget::pane` background is set to `viewer_bg` too (not `bg_main`) so
+there's no mismatched sliver between the tab bottom and the actual viewer.
+`_ChromeTabBar.setFixedHeight(_TAB_H)` is required — native styles otherwise
+reserve a few px of margin beyond `tabSizeHint`, which left a thin `bar_bg`
+line between the tab shapes and the content below.
 
 ### NavButton (custom-painted)
 
@@ -141,7 +211,7 @@ _push(idx):
 
 ---
 
-## Word Editor (word_editor.py)
+## Word Editor (app/word_editor.py)
 
 ```
 WordEditor (QWidget)           # workspace screen, not a dialog
@@ -229,7 +299,7 @@ _save_to(path):
 
 ---
 
-## Theme System (theme.py)
+## Theme System (app/theme.py)
 
 ### Theme fields
 
@@ -281,12 +351,14 @@ THEME_MGR.reset()          → restore defaults + notify
 THEME_MGR.add_listener(cb) → cb() on every update/reset
 ```
 
-Registered listeners: `ScreenMain._apply_theme`, `ScreenViewer.apply_theme`,
-`WordEditor.apply_theme`, `ScreenSettings._sync_from_theme`, `_MiniPreview.update`.
+Registered listeners: `ScreenMain._apply_theme` (also calls `set_title_bar_color`),
+`PdfViewerTabs.apply_theme` (forwards to every open `ScreenViewer` + repaints the tab bar),
+`ScreenViewer.apply_theme`, `WordEditor.apply_theme`, `ScreenSettings._sync_from_theme`,
+`_MiniPreview.update`.
 
 ---
 
-## Viewer (screen_viewer.py)
+## Viewer (app/screens/viewer.py)
 
 ```
 ScreenViewer (QWidget)
@@ -299,6 +371,10 @@ ScreenViewer (QWidget)
     ├── _lbl_pages  (52px center)  "3/9"
     └── _lbl_cursor (130px right)  "x 123.4  y 456.7 pt"
 ```
+
+`close_doc()` — releases `_doc`/`_pages` and closes the fitz handle; called by
+`PdfViewerTabs` before deleting a tab's viewer (on close or `reset()`), so the
+native PDF handle doesn't leak.
 
 ### PageWidget
 
@@ -326,7 +402,7 @@ _do_print()       → QPainter per page; scaled KeepAspectRatio, centered
 
 ---
 
-## Settings Screen (screen_settings.py)
+## Settings Screen (app/screens/settings.py)
 
 ```
 ScreenSettings
@@ -344,7 +420,7 @@ ScreenSettings
 
 ---
 
-## Icons (icons.py)
+## Icons (app/icons.py)
 
 ```python
 _ICON_NAMES = {scissors, merge, rotate, compress_layers, gear,
@@ -362,7 +438,7 @@ draw(p, rect, name, color):
 
 ---
 
-## Editor State (ScreenMergeMulti)
+## Editor State (app/screens/merge.py — ScreenMergeMulti)
 
 ```python
 files           list[str]                       # open paths
@@ -425,28 +501,30 @@ Re-render always via `_render_timer.start(0)` (0 ms debounce, single-shot).
 
 **Open docx:**
 ```
-Word folder btn clicked
-  → DrillDownPanel._push(sub_idx)  → _expand_sidebar() if collapsed
-  → _select("word")                → show _word_drop_zone
-
-_word_drop_zone.file_chosen / "Відкрити Word" clicked
-  → _open_word_path(path)
-    → unsaved check (only if _path is not None)
+.docx dropped/picked on _drop_zone → _on_file_chosen([path])
+  → _open_word(path)
+    → unsaved check (only if WordEditor.has_unsaved_changes())
     → _word_editor.open_file(path)
-    → _select("word")              → show _word_editor
+    → show _word_editor; right_tool_stack→2; right_sidebar.setVisible(True)
 ```
 
-**Open PDF in viewer:**
+**Open PDF (single or multiple):**
 ```
-_viewer_drop_zone.file_chosen → _on_viewer_file_chosen() → _viewer.load_pdf() → _select("viewer")
-right-panel "Відкрити PDF"    → QFileDialog              → _viewer.load_pdf()
+.pdf(s) dropped/picked on _drop_zone → _on_file_chosen(paths)
+  → _open_pdf_tabs(paths)
+    → _viewer_tabs.reset(); _viewer_tabs.add_tab(p) for each path
+    → show _viewer_tabs; right_tool_stack→1 (PDF tools); right_sidebar.setVisible(True)
+
+right-panel "+"/drag-drop onto a tab → PdfViewerTabs._on_add_clicked() → QFileDialog → add_tab(p)
+right-panel "Розділити/Об'єднати PDF" → _on_pdf_edit() → pulls _viewer_tabs.paths() into _merge
 ```
 
 **Theme change:**
 ```
 slider/color changed
   → THEME_MGR.update(k=v) → _notify()
-      ScreenMain._apply_theme()          sidebar stylesheets + btn.update()
+      ScreenMain._apply_theme()          bg/top_gap/right_sidebar stylesheets + set_title_bar_color()
+      PdfViewerTabs.apply_theme()        pane stylesheet + tab bar repaint + every open ScreenViewer
       ScreenViewer.apply_theme()         scroll area + status bar
       WordEditor.apply_theme()           toolbar + editor + _apply_page_format()
       ScreenSettings._sync_from_theme()  controls update (blockSignals)
@@ -470,7 +548,7 @@ undo()        → pop → restore → _render_timer.start(0)
 
 ---
 
-## Constants (constants.py)
+## Constants (app/constants.py)
 
 ```python
 GREEN_COLOR  = "#6EDE8A"
@@ -485,7 +563,7 @@ group_color(n):   # reads THEME_MGR.get().group_color_{n-1}  (live-updating)
 
 ---
 
-## Widgets (widgets.py)
+## Widgets (app/widgets.py)
 
 | Class | Purpose |
 |---|---|

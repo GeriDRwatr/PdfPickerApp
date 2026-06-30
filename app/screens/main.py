@@ -8,6 +8,7 @@ from ..word_editor import WordEditor
 from ..theme import THEME_MGR
 from .. import icons as _icons
 from ..widgets import _HoverMixin
+from ..win_register import set_title_bar_color
 
 SIDEBAR_EXPANDED  = 210
 SIDEBAR_COLLAPSED = 62
@@ -513,9 +514,18 @@ class ScreenMain(QtWidgets.QWidget):
     # ── build ─────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        root = QtWidgets.QHBoxLayout(self)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._top_gap = QtWidgets.QFrame()
+        self._top_gap.setFixedHeight(8)
+        outer.addWidget(self._top_gap)
+
+        root = QtWidgets.QHBoxLayout()
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        outer.addLayout(root, 1)
 
         root.addWidget(self._make_workspace(), 1)
         root.addWidget(self._make_right_sidebar())
@@ -673,6 +683,8 @@ class ScreenMain(QtWidgets.QWidget):
     def _apply_theme(self):
         t = THEME_MGR.get()
         self.setStyleSheet(f"background: {t.bg_main};")
+        set_title_bar_color(self, t.bg_main)
+        self._top_gap.setStyleSheet(f"background: {t.bg_main};")
         self._right_sidebar.setStyleSheet(f"""
             QFrame#right_sidebar {{
                 background: {t.bg_sidebar};

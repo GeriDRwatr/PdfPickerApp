@@ -13,6 +13,7 @@ from app.icons import sf_font
 def main():
     register_as_pdf_viewer()
     app = QtWidgets.QApplication(sys.argv)
+    app.setStyle("Fusion")   # native Windows style ignores QSS on QTabBar/QComboBox/etc.
     app.setFont(sf_font(13))
     w = ScreenMain()
     w.show()

@@ -4,8 +4,8 @@ import fitz
 from PySide6 import QtWidgets, QtCore, QtGui
 
 from ..constants import GREEN_COLOR, MAX_GROUPS, THUMB_SCALE, group_color
-from ..widgets import (FullBorderPaper, GroupButton, GroupDeck,
-                     DraggableCard, ThumbnailActionButton)
+from ..ui.widgets import (FullBorderPaper, GroupButton, GroupDeck,
+                          DraggableCard, ThumbnailActionButton)
 from ..pdf_utils import clear_layout, safe_thumbnail_render
 
 
@@ -460,6 +460,7 @@ class ScreenMergeMulti(QtWidgets.QWidget):
         path, ai = self.page_list[visual_i]
         for rot in (0, 90, 180, 270):
             self._pixmap_cache.pop((path, ai, rot), None)
+        self._render_timer.start(0)
 
     def delete_page(self, visual_i: int):
         if visual_i >= len(self.page_list):

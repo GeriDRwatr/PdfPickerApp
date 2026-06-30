@@ -1,4 +1,6 @@
-from .. import icons as _icons
+from ..ui import icons as _icons
+
+_svg_icons = _icons
 from PySide6 import QtWidgets, QtCore, QtGui
 from ..theme import THEME_MGR
 
@@ -73,9 +75,11 @@ class _MiniPreview(QtWidgets.QWidget):
                               else t.nav_icon_inactive_color)
             ic.setAlpha(t.nav_icon_active_alpha if active
                         else t.nav_icon_inactive_alpha)
-            _icons.draw(p,
-                        QtCore.QRectF(14 - isz/2, y + ih/2 - isz/2, isz, isz),
-                        icon_name, ic)
+            icon_rect = QtCore.QRectF(14 - isz/2, y + ih/2 - isz/2, isz, isz)
+            if _svg_icons.has_svg(icon_name):
+                _svg_icons.draw(p, icon_rect, icon_name, ic)
+            else:
+                _icons.draw(p, icon_rect, icon_name, ic)
             lc = QtGui.QColor(t.nav_label_active_color if active
                               else t.nav_label_inactive_color)
             lc.setAlpha(t.nav_label_active_alpha if active
@@ -94,7 +98,7 @@ class _MiniPreview(QtWidgets.QWidget):
         y += 6
         ic = QtGui.QColor(t.nav_icon_inactive_color)
         ic.setAlpha(t.nav_icon_inactive_alpha)
-        _icons.draw(p, QtCore.QRectF(14 - 6, y + 15 - 6, 12, 12), "gear", ic)
+        _svg_icons.draw(p, QtCore.QRectF(14 - 6, y + 15 - 6, 12, 12), "gear", ic)
         lc = QtGui.QColor(t.nav_label_inactive_color)
         lc.setAlpha(t.nav_label_inactive_alpha)
         p.setFont(QtGui.QFont("", 8))

@@ -4,11 +4,13 @@ from PySide6 import QtWidgets, QtCore, QtGui
 
 from .merge import ScreenMergeMulti
 from .viewer import PdfViewerTabs
-from ..word_editor import WordEditor
+from .word_editor import WordEditor
 from ..theme import THEME_MGR
-from .. import icons as _icons
-from ..widgets import _HoverMixin
-from ..win_register import set_title_bar_color
+from ..ui import icons as _icons
+from ..ui.widgets import _HoverMixin
+from ..platform import set_title_bar_color
+
+_svg_icons = _icons   # unified — kept as alias so internal usages still compile
 
 SIDEBAR_EXPANDED  = 210
 SIDEBAR_COLLAPSED = 62
@@ -82,7 +84,9 @@ class NavButton(_HoverMixin, QtWidgets.QAbstractButton):
         icon_cy = r.height() / 2.0
         icon_rf = QtCore.QRectF(icon_cx - icon_sz / 2, icon_cy - icon_sz / 2,
                                 icon_sz, icon_sz)
-        if _icons.is_icon(self._icon):
+        if _svg_icons.has_svg(self._icon):
+            _svg_icons.draw(p, icon_rf, self._icon, icon_color)
+        elif _icons.is_icon(self._icon):
             _icons.draw(p, icon_rf, self._icon, icon_color)
         else:
             font = _icons.sf_font(18)

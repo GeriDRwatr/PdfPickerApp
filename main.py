@@ -5,9 +5,9 @@ from PySide6 import QtWidgets
 
 fitz.TOOLS.mupdf_display_errors(False)
 
-from app.win_register import register_as_pdf_viewer
-from app.screens.main import ScreenMain
-from app.icons import sf_font
+from app.platform import register_as_pdf_viewer
+from app.screens.window import ScreenMain
+from app.ui.icons import sf_font
 
 
 def main():

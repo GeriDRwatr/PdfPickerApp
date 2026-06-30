@@ -1,7 +1,9 @@
 from PySide6 import QtWidgets, QtCore, QtGui
 
-from .constants import group_color as _group_color
-from . import icons as _icons
+from ..constants import group_color as _group_color
+from ..ui import icons as _icons
+# svg_icons merged into ui.icons — unified draw() dispatches automatically
+_svg_icons = _icons
 
 
 def _mix_colors(c1: QtGui.QColor, c2: QtGui.QColor, t: float) -> QtGui.QColor:
@@ -58,6 +60,7 @@ class ThumbnailActionButton(_HoverMixin, QtWidgets.QAbstractButton):
         self._press = False
         self.update()
         super().mouseReleaseEvent(event)
+        event.accept()   # prevent propagation to DraggableCard underneath
 
     def paintEvent(self, event):
         p = QtGui.QPainter(self)
@@ -81,7 +84,10 @@ class ThumbnailActionButton(_HoverMixin, QtWidgets.QAbstractButton):
         icon_rf = QtCore.QRectF(cx - icon_sz/2, cy - icon_sz/2, icon_sz, icon_sz)
         ic = QtGui.QColor(self._color)
         ic.setAlphaF(1.0)
-        _icons.draw(p, icon_rf, self._icon_name, ic)
+        if _svg_icons.has_svg(self._icon_name):
+            _svg_icons.draw(p, icon_rf, self._icon_name, ic)
+        else:
+            _icons.draw(p, icon_rf, self._icon_name, ic)
         p.end()
 
 

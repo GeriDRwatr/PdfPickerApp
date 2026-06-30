@@ -3,9 +3,11 @@ import fitz
 import math as _math
 from PySide6 import QtWidgets, QtCore, QtGui
 from ..theme import THEME_MGR
-from .. import icons as _icons
-from ..widgets import _HoverMixin
+from ..ui import icons as _icons
+from ..ui.widgets import _HoverMixin
 from ..pdf_utils import safe_thumbnail_render
+
+_svg_icons = _icons   # unified — kept as alias so call-sites compile unchanged
 
 
 class _FirstPageButton(_HoverMixin, QtWidgets.QAbstractButton):
@@ -43,7 +45,7 @@ class _FirstPageButton(_HoverMixin, QtWidgets.QAbstractButton):
             alpha = int(t.statusbar_page_alpha)
         c = QtGui.QColor(t.nav_icon_inactive_color)
         c.setAlpha(alpha)
-        _icons.draw(p, self.rect(), "arrow_up", c)
+        _svg_icons.draw(p, QtCore.QRectF(self.rect()), "arrow_up", c)
         p.end()
 
 # 100 % zoom: 1 PDF point rendered as 1 screen pixel at 96 DPI
@@ -382,14 +384,15 @@ class _ToolbarButton(_HoverMixin, QtWidgets.QAbstractButton):
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         t = THEME_MGR.get()
         r = self.rect()
-
         enabled = self.isEnabled()
+
+        # subtle hover highlight only — no permanent background
         if self._hover and enabled:
             bg = QtGui.QColor(t.nav_hover_bg)
             bg.setAlpha(t.nav_hover_bg_alpha)
             p.setPen(QtCore.Qt.NoPen)
             p.setBrush(bg)
-            p.drawRoundedRect(r.adjusted(2, 2, -2, -2), 7, 7)
+            p.drawRoundedRect(QtCore.QRectF(r).adjusted(2, 2, -2, -2), 7, 7)
 
         color = QtGui.QColor(t.nav_icon_inactive_color)
         if not enabled:
@@ -401,9 +404,12 @@ class _ToolbarButton(_HoverMixin, QtWidgets.QAbstractButton):
             color.setAlpha(min(255, t.nav_icon_inactive_alpha + 55))
         icon_cx = (r.center().x() - 6) if self._chevron else r.center().x()
         if self._is_icon:
-            sz = t.icon_size
+            sz = t.icon_size + 2    # SVG icons sit slightly larger than stroke icons
             icon_r = QtCore.QRectF(icon_cx - sz / 2, r.center().y() - sz / 2, sz, sz)
-            _icons.draw(p, icon_r, self._content, color)
+            if _svg_icons.has_svg(self._content):
+                _svg_icons.draw(p, icon_r, self._content, color)
+            else:
+                _icons.draw(p, icon_r, self._content, color)
         else:
             p.setFont(_icons.sf_font(17, QtGui.QFont.DemiBold))
             p.setPen(color)
@@ -485,7 +491,7 @@ class _SearchBox(QtWidgets.QWidget):
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         color = QtGui.QColor(t.nav_icon_inactive_color)
         color.setAlpha(t.nav_icon_inactive_alpha)
-        _icons.draw(p, QtCore.QRectF(0, 0, 14, 14), "search", color)
+        _svg_icons.draw(p, QtCore.QRectF(0, 0, 14, 14), "search", color)
         p.end()
         self._icon_lbl.setPixmap(pm)
 
@@ -814,14 +820,21 @@ class ScreenViewer(QtWidgets.QWidget):
         self._thumb_toggle_btn.right_clicked.connect(self._show_sidebar_menu)
         tbl.addWidget(self._thumb_toggle_btn)
 
-        tbl.addStretch(1)
+        tbl.addSpacing(4)
 
+        # ── left cluster: info + save ────────────────────────────────────────
         info_btn = _ToolbarButton("info")
         info_btn.setToolTip("Властивості документа")
         info_btn.clicked.connect(self._show_info_dialog)
         tbl.addWidget(info_btn)
 
-        tbl.addSpacing(4)
+        save_btn = _ToolbarButton("save")
+        save_btn.setToolTip("Зберегти з поворотами…")
+        save_btn.clicked.connect(self._export_pdf)
+        tbl.addWidget(save_btn)
+
+        # ── zoom cluster centred ─────────────────────────────────────────────
+        tbl.addStretch(1)
 
         zoom_out_btn = _ToolbarButton("zoom_out")
         zoom_out_btn.setToolTip("Зменшити")
@@ -838,14 +851,13 @@ class ScreenViewer(QtWidgets.QWidget):
         zoom_in_btn.clicked.connect(self._zoom_in)
         tbl.addWidget(zoom_in_btn)
 
-        tbl.addSpacing(4)
+        tbl.addStretch(1)
 
+        # ── right cluster: share, markup, rotate, a_circle ──────────────────
         share_btn = _ToolbarButton("share")
         share_btn.setToolTip("Поділитися (скоро)")
         share_btn.setEnabled(False)
         tbl.addWidget(share_btn)
-
-        tbl.addSpacing(2)
 
         markup_btn = _ToolbarButton("markup", chevron=True)
         markup_btn.setToolTip("Маркування (скоро)")
@@ -862,7 +874,7 @@ class ScreenViewer(QtWidgets.QWidget):
         tbl.addSpacing(4)
 
         rotate_btn = _ToolbarButton("rotate")
-        rotate_btn.setToolTip("Повернути сторінки на 90°")
+        rotate_btn.setToolTip("Повернути поточну сторінку на 90°")
         rotate_btn.clicked.connect(self._rotate_view)
         tbl.addWidget(rotate_btn)
 
@@ -880,7 +892,7 @@ class ScreenViewer(QtWidgets.QWidget):
         tbl.addWidget(self._search_box)
 
         self._toolbar_buttons = [
-            self._thumb_toggle_btn, info_btn,
+            self._thumb_toggle_btn, info_btn, save_btn,
             zoom_out_btn, zoom_in_btn,
             share_btn, markup_btn, rotate_btn, atext_btn,
         ]
@@ -1291,13 +1303,39 @@ class ScreenViewer(QtWidgets.QWidget):
     def _update_zoom_label(self):
         self._lbl_zoom.setText(f"{round(self._scale / _SCALE_100 * 100)}%")
 
-    # ── view rotation ─────────────────────────────────────────────────────────
+    # ── view rotation (current page only) ────────────────────────────────────
 
     def _rotate_view(self):
-        self._view_rotation = (self._view_rotation + 90) % 360
-        for pw in self._pages:
-            pw.set_rotation(self._view_rotation)
+        """Rotate the page currently in view by 90° (view-only, not saved to file)."""
+        if not self._pages:
+            return
+        pw = self._pages[self._current_page]
+        pw.set_rotation(pw._rotation + 90)
         self._rebuild_page_layout()
+        self._go_to_page(self._current_page)
+
+    # ── export PDF with rotations applied ────────────────────────────────────
+
+    def _export_pdf(self):
+        """Save a copy of the document with any viewer rotations baked in."""
+        if not self._doc or not self._path:
+            return
+        default = self._path.replace(".pdf", "_повернуто.pdf")
+        out_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Зберегти PDF", default, "PDF (*.pdf)"
+        )
+        if not out_path:
+            return
+        try:
+            new_doc = fitz.open(self._path)
+            for i, pw in enumerate(self._pages):
+                if pw._rotation != 0:
+                    page = new_doc.load_page(i)
+                    page.set_rotation((page.rotation + pw._rotation) % 360)
+            new_doc.save(out_path, garbage=4, deflate=True)
+            new_doc.close()
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Помилка", f"Не вдалося зберегти:\n{e}")
 
     # ── document info dialog ──────────────────────────────────────────────────
 

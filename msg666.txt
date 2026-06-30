@@ -1,0 +1,57 @@
+Привіт. Продовжуємо роботу над проєктом TDTool — PDF-переглядач + редактор на PySide6 + PyMuPDF (Python 3.13).
+
+Репо: https://github.com/GeriDRwatr/TD_Tool.git
+
+--- РОЗГОРТАННЯ НА WINDOWS ---
+
+git clone https://github.com/GeriDRwatr/TD_Tool.git
+cd TD_Tool
+python -m venv venv
+venv\Scripts\activate
+pip install PySide6 PyMuPDF python-docx pywin32-ctypes
+python main.py
+
+
+--- СТРУКТУРА ПРОЄКТУ (після рефакторингу) ---
+
+TDTool/
+├── main.py                    # точка входу
+├── app/
+│   ├── constants.py
+│   ├── theme.py               # ThemeManager + Theme dataclass
+│   ├── pdf_utils.py
+│   ├── platform.py            # Windows: register_as_pdf_viewer, set_title_bar_color
+│   ├── ui/
+│   │   ├── icons/
+│   │   │   ├── __init__.py    # unified draw() — SVG + hand-drawn vector fallback
+│   │   │   └── svg/           # 24 Lucide SVG іконки
+│   │   └── widgets.py         # _HoverMixin, DraggableCard, ThumbnailActionButton та ін.
+│   └── screens/
+│       ├── window.py          # ScreenMain — головне вікно, правий сайдбар
+│       ├── viewer.py          # ScreenViewer, PageWidget, PdfViewerTabs
+│       ├── merge.py           # ScreenMergeMulti — split/merge PDF
+│       ├── settings.py        # ScreenSettings, _MiniPreview
+│       └── word_editor.py     # WordEditor
+
+
+--- ЩО РЕАЛІЗОВАНО В ПЕРЕГЛЯДАЧІ (viewer.py) ---
+
+- Ліва панель мініатюр + зміст (TOC) — перемикається правою кнопкою на іконці sidebar
+- Режими сторінок: неперервне / окрема сторінка / дві сторінки
+- Зум: Ctrl+колесо / pinch-жест тачпаду / кнопки тулбару
+- HiDPI/Retina рендеринг (devicePixelRatio × fitz.Matrix)
+- Виділення тексту: 2 кліки — слово, 3 — рядок, 4 — абзац
+- Пошук по документу: case-insensitive для кирилиці
+- Тулбар: info, save (експорт з поворотами), zoom по центру, share/markup/rotate/T
+- Поворот поточної сторінки; окрема кнопка збереження зі збереженням поворотів
+- Drag-and-drop PDF прямо на переглядач
+
+
+--- ВАЖЛИВІ НЮАНСИ ---
+
+- app/platform.py — Windows-specific (pywin32-ctypes). На macOS/Linux no-op, не падає.
+- app/screens/window.py — НЕ main.py (перейменовано щоб уникнути конфлікту з кореневим main.py)
+- Іконки: app/ui/icons/ — Python-пакет. draw(painter, rect, name, color) сам обирає SVG або
+  vector. Окремо імпортувати svg_icons не потрібно.
+- Lucide/ папка (якщо є на диску) — локальне джерело іконок, в .gitignore, в репо не входить.
+- window_state.json (розмір вікна) і app/theme.json (тема) — в .gitignore, runtime-файли.

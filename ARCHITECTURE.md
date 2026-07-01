@@ -13,7 +13,7 @@ Stack: **PySide6 + PyMuPDF (fitz)**. All UI custom-painted (paintEvent). No Qt D
 | `app/constants.py` | `group_color(n)` reads THEME_MGR; fixed color constants |
 | `app/pdf_utils.py` | `clear_layout` · `safe_thumbnail_render` |
 | `app/docx_convert.py` | `docx_to_html()` · `list_type()` — чиста конвертація docx.Document → HTML, без Qt (тестується юніт-тестами) |
-| `app/ocr.py` | `ocr_document()` · `tesseract_available()` · `pick_language()` — OCR сканованих PDF через системний tesseract (subprocess, без pytesseract/Pillow); викликається з тулбару ScreenViewer |
+| `app/ocr.py` | `ocr_document()` · `tesseract_available()` · `pick_language()` · `LANGUAGE_CHOICES` — OCR сканованих PDF через системний tesseract (subprocess, без pytesseract/Pillow); мова обирається користувачем явно (`ScreenViewer._ask_ocr_language()`), не змішується автоматично; докладніше — розділ OCR нижче |
 | `app/platform.py` | `register_as_pdf_viewer()` · `set_title_bar_color()` — Windows-only; no-op elsewhere |
 | `app/ui/icons/` | **Python package** — unified icon renderer: `draw(p,rect,name,color)` auto-selects Lucide SVG or hand-drawn vector; `sf_font(px,w)` |
 | `app/ui/icons/svg/` | 28 Lucide SVG files bundled with the package |
@@ -303,6 +303,53 @@ _save_to(path):
 2. docx2pdf.convert(src, out)               (if installed; uses MS Word on Win/macOS)
 3. QPrinter PDF output                      (always works; limited formatting)
 ```
+
+---
+
+## OCR (app/ocr.py)
+
+Розпізнавання тексту для сканованих PDF без текстового шару. Викликається з
+кнопки "OCR" у тулбарі `ScreenViewer` (`_run_ocr()`, `_ask_ocr_language()`).
+
+```
+tesseract_available()      shutil.which("tesseract") is not None
+available_languages()      "tesseract --list-langs" → set() встановлених мов
+has_text_layer(doc)        евристика: перші 3 сторінки, ≥20 символів → True
+
+pick_language(preferred="ukr")
+  → preferred, якщо встановлена, інакше "eng"
+  # НЕ комбінує мови автоматично — кирилиця/латиниця мають однаково намальовані
+  # літери (а,о,е,р,с,х,у...), tesseract плутає їх навіть в одномовному тексті.
+  # "ukr+eng" лишається доступним через LANGUAGE_CHOICES, тільки як явний вибір
+  # користувача в _ask_ocr_language() (QInputDialog.getItem), не мовчазний дефолт.
+
+ocr_document(doc, lang, progress_cb)
+  для кожної сторінки → _ocr_page_to_pdf_bytes():
+    page.get_pixmap(matrix=300dpi, colorspace=fitz.csGRAY) → PNG
+    tesseract img out.pdf -l {lang} --dpi 300 pdf   (subprocess)
+    → single-page PDF (зображення + невидимий текстовий шар) → insert_pdf у результат
+  progress_cb(done, total) → False скасовує (кидає OcrError)
+```
+
+**Свідомо БЕЗ авто-корекції повороту сторінки.** Пробували додати OSD-прохід
+(`tesseract --psm 0` → "Rotate: N") перед основним розпізнаванням — на
+синтетичних тестах працювало ідеально, але на реальному сканованому договорі
+користувача OSD помилково визначив поворот 180° з мізерною впевненістю (і
+навіть переплутав мову з арабською) і розвертав ПРАВИЛЬНО зорієнтовані
+сторінки, перетворюючи чіткий текст на суцільну кашу. Видалено того ж дня.
+Якщо колись повертатись до цієї ідеї — обов'язково гейтити за "Orientation
+confidence" з високим порогом, і перевіряти лише на реальних сканах
+користувача, не на чистих синтетичних рендерах.
+
+Якість розпізнавання на реальних сканах обмежена нативною роздільною
+здатністю вбудованого зображення сторінки (часто ~100 DPI для старих
+фотокопій) — рендер у 300 DPI лише підганяє розмір гліфів під очікування
+LSTM-моделі tesseract, він не відновлює деталі, яких немає в джерелі.
+
+Мовні моделі tesseract на робочих машинах замінені зі стандартних на
+`tessdata_best` (github.com/tesseract-ocr/tessdata_best) — точніші, але це
+системний файл у `tessdata/`, не частина репозиторію; при переустановці
+tesseract на новій машині крок треба повторити вручну.
 
 ---
 

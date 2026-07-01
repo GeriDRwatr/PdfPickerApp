@@ -118,34 +118,49 @@ direct comparison: identical QSS rendered correctly in an automated/headless
 run but as unstyled native "pill" tabs on a real interactive desktop session.
 `main.py` also sets `app.setStyle("Fusion")` as a belt-and-suspenders fallback.
 
+The thumbnail/TOC sidebar was moved OUT of `ScreenViewer` and now lives here
+as one full-height column shared across all tabs — switching tabs reloads the
+sidebar's content for the new active document instead of each viewer owning
+(and re-rendering) its own copy.
+
 ```
 PdfViewerTabs (QWidget)
-└── _tabs  QTabWidget (documentMode, tabsClosable=False — close glyph is custom-drawn)
-    └── tabBar() = _FileTabBar
-        ├── real tab × N    one ScreenViewer each (setAcceptDrops(False) — adding
-        │                   goes through "+" or the drop zone, not drag-onto-tab)
-        └── "+" tab         tabData(idx) == "plus"; always the LAST tab (not a
-                             QTabWidget cornerWidget — that left a gap before it)
+├── root  QHBoxLayout
+│   ├── _side_panel  QWidget (168px, full height, hidden until toggled)
+│   │   └── _side_stack  QStackedWidget
+│   │       ├── [0] _thumb_panel  _ThumbnailPanel (QScrollArea)
+│   │       └── [1] _toc_panel    _TocPanel (QTreeWidget) — doc.get_toc()
+│   └── right_col  QWidget
+│       ├── tab_row  QWidget (fixed height = _FileTabBar._TAB_H)
+│       │   ├── _bar              _FileTabBar (bare QTabBar — NOT inside a QTabWidget)
+│       │   ├── _btn_new_tab      _TabBarIconBtn("tab_plus") — outside the bar, always last
+│       │   ├── _btn_scroll_left  _TabBarIconBtn("chevron_left")
+│       │   └── _btn_scroll_right _TabBarIconBtn("chevron_right")
+│       └── _stack  QStackedWidget         one ScreenViewer per open PDF (mirrors _bar's order)
 ```
 
 ```python
 add_tab(path):
-  if path already open: setCurrentIndex(that tab); return
-  ScreenViewer().load_pdf(path) → insertTab(at plus_index(), viewer, basename)
-reset():            remove every tab except the trailing "+" one; viewer.close_doc() each
+  if path already open: _bar.setCurrentIndex(that tab); return
+  ScreenViewer().load_pdf(path) → _bar.insertTab(...) + _stack.insertWidget(...) at the same index
+reset():            remove every tab from _bar/_stack; viewer.close_doc() each
 paths() -> list[str]
 current_viewer() -> ScreenViewer | None
-all_closed signal:  emitted from _close_tab() when only the "+" tab is left
+all_closed signal:  emitted from _close_tab() when the last tab is removed
 ```
 
-**"+" tab as a real tab, not a corner widget** — `QTabWidget.setCornerWidget`
-anchors to the far edge of the whole bar, leaving a gap before it whenever tabs
-don't fill the width. Making "+" the actual last tab (`tabData == "plus"`, no
-close glyph) keeps it flush against the last document tab. Clicking it
-(`_on_current_changed`) reverts `currentIndex` to the previous tab and opens
-`QFileDialog.getOpenFileNames`.
+**"+" and scroll buttons live outside the tab bar, not inside it** — `_bar` is
+a bare `QTabBar`, not a `QTabWidget`, so there's no `cornerWidget` gap problem
+to work around (an earlier version used `tabData(idx)=="plus"` as a fake last
+tab for exactly that reason; no longer needed). `_btn_new_tab` /
+`_btn_scroll_left` / `_btn_scroll_right` are `_TabBarIconBtn`s in the same
+`tab_row` layout, painted to match the bar's own background/hover style so
+they read as part of it. `_bar.setUsesScrollButtons(False)` — native Qt
+tab-bar scrolling is replaced by `_FileTabBar._scroll_px`, a custom pixel
+offset driving `_logical_tab_rect()`; the scroll buttons switch to the
+next/previous tab and call `_ensure_tab_visible()`.
 
-**Shrink-to-fit sizing** (`tabSizeHint`) — real tabs split the bar width evenly
+**Shrink-to-fit sizing** (`tabSizeHint`) — tabs split the bar width evenly
 (`_PREF_W=200` cap, `_MIN_W=64` floor); recalculated on every `resizeEvent`.
 
 **Custom drag-reorder** (`setMovable(False)` — native QTabBar movable was
@@ -171,17 +186,14 @@ then all text in a single pass let a neighbor's text — drawn after the
 selected tab's background fill — show through on top of it during a drag.
 
 ```python
-active_bg   = THEME_MGR.get().viewer_bg     # exact match to the page-thumbnail area
-                                             # → active tab visually "flows into" the document
-inactive_bg = bg_sidebar.lighter(115)       # a step above the bar itself (lighter(115) too)
-hover_bg    = bg_sidebar.lighter(140)
+bar_bg      = bg_main                       # bar + inactive tabs fuse into the OS title bar
+active_bg   = viewer_bg                     # lifts the selected tab above the bar
+inactive_bg = bar_bg
+hover_bg    = blend(bar_bg, active_bg, 0.18)
 ```
-Brightness ordering matters: inactive/bar must stay clearly *below* `viewer_bg`
-or the active tab stops reading as "the highlighted one" (regressed once when
-inactive briefly ended up brighter than flat `bg_main`).
 
-`QTabWidget::pane` background is set to `viewer_bg` too (not `bg_main`) so
-there's no mismatched sliver between the tab bottom and the actual viewer.
+`_stack` background is set to `viewer_bg` too (not `bg_main`) so there's no
+mismatched sliver between the tab bottom and the actual viewer.
 `_FileTabBar.setFixedHeight(_TAB_H)` is required — native styles otherwise
 reserve a few px of margin beyond `tabSizeHint`, which left a thin `bar_bg`
 line between the tab shapes and the content below.
@@ -414,29 +426,33 @@ Registered listeners: `ScreenMain._apply_theme` (also calls `set_title_bar_color
 
 ## Viewer (app/screens/viewer.py)
 
+The thumbnail/TOC sidebar is owned by `PdfViewerTabs` (see above), not
+`ScreenViewer` — `ScreenViewer` itself is just toolbar + document + status bar.
+
 ```
 ScreenViewer (QWidget)
-├── body  QHBoxLayout
-│   ├── _side_panel  QWidget (168px, hidden until toggled)
-│   │   ├── _side_header   QWidget (44px) — current file name only, no buttons
-│   │   └── _side_stack    QStackedWidget
-│   │       ├── [0] _thumb_panel  _ThumbnailPanel (QScrollArea)
-│   │       └── [1] _toc_panel    _TocPanel (QTreeWidget) — doc.get_toc()
-│   └── right  QVBoxLayout                       — sits over the WORK AREA only,
-│       ├── _toolbar  QWidget (44px)                NOT above _side_panel
-│       │   ├── _thumb_toggle_btn  _ToolbarButton("sidebar", chevron=True)
-│       │   │     left-click  → _toggle_thumbnails()         (show/hide thumbnails)
-│       │   │     right-click → _show_sidebar_menu()  QMenu  (sidebar mode + page mode)
-│       │   ├── zoom_out_btn / _lbl_zoom / zoom_in_btn
-│       │   └── _search_box  _SearchBox  (QLineEdit + magnifying-glass icon)
-│       ├── _toolbar_divider  QFrame (1px)
-│       ├── QScrollArea (_scroll)       bg: viewer_bg
-│       │   └── _container QWidget → _vbox QVBoxLayout → PageWidget × N
-│       │       (or row-wrapper QWidget × N/2 in "two" page mode — see below)
-│       └── _status_bar QWidget (28px)
-│           ├── _lbl_file   (stretch 1)    "filename.pdf"
-│           ├── _lbl_pages  (52px center)  "3/9"
-│           └── _lbl_cursor (130px right)  "x 123.4  y 456.7 pt"
+├── root  QVBoxLayout
+│   ├── _toolbar  QWidget (44px) — 3-panel equal-flex layout (same centering
+│   │   │                          trick as the status bar below)
+│   │   ├── left    _thumb_toggle_btn / info_btn / save_btn / ocr_btn / _lbl_file (stretch)
+│   │   │     _thumb_toggle_btn  _ToolbarButton("sidebar", chevron=True)
+│   │   │       left-click  → sidebar_toggle_requested signal (PdfViewerTabs._toggle_sidebar)
+│   │   │       right-click → _show_sidebar_menu()  QMenu  (sidebar mode + page mode)
+│   │   │     info_btn  → _show_info_dialog()     save_btn → _export_pdf()
+│   │   │     ocr_btn   → _run_ocr()  (see OCR section below)
+│   │   │     _lbl_file elided filename, stretch=1 — lives in the TOOLBAR, not the status bar
+│   │   ├── center  _lbl_pages ("3/9") — zoom buttons are built here (signals wired
+│   │   │                                alongside the rest of the toolbar) but are
+│   │   │                                actually placed in the status bar below
+│   │   └── right   share_btn / markup_btn (disabled, "скоро") / rotate_btn / atext_btn
+│   │                (disabled, "скоро") / _search_box
+│   ├── QScrollArea (_scroll)       bg: viewer_bg
+│   │   └── _container QWidget → _vbox QVBoxLayout → PageWidget × N
+│   │       (or row-wrapper QWidget × N/2 in "two" page mode — see below)
+│   └── _status_bar QWidget (32px) — equal-flex: left spacer | zoom cluster | cursor+first-page
+│       ├── (stretch 1)
+│       ├── zoom_out_btn / _lbl_zoom ("100%") / zoom_in_btn
+│       └── (stretch 1) _lbl_cursor (130px, right-aligned) / _btn_first_page → _go_to_page(0)
 ```
 
 `close_doc()` — releases `_doc`/`_pages`, clears `_thumb_panel`/`_toc_panel`/

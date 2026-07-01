@@ -48,6 +48,7 @@ _SVG_MAP: dict[str, str] = {
     "chevron_left":     "chevron-left",
     "chevron_right":    "chevron-right",
     "tab_plus":         "plus",
+    "ocr":              "scan-text",
 }
 
 _svg_cache: dict[str, str] = {}

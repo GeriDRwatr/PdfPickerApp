@@ -5,6 +5,7 @@ import os
 import fitz
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from .. import ocr
 from ..pdf_utils import safe_thumbnail_render
 from ..theme import THEME_MGR
 from ..ui import icons as _icons
@@ -96,9 +97,13 @@ class PageWidget(QtWidgets.QWidget):
         self._coord_off_y = 0.0
         self.setCursor(QtCore.Qt.IBeamCursor)
         self.setMouseTracking(True)
-        self._render()
+        self._init_metrics()
 
     # ── rendering ─────────────────────────────────────────────────────────────
+    # Розмір/координати/текстовий шар (_init_metrics) обчислюються одразу для
+    # кожної сторінки — це дешево. Растрове зображення (ensure_pixmap) рендериться
+    # лише коли сторінка потрапляє у видиму область — рендер усього документа
+    # одразу заморожував би UI на великих PDF (сотні сторінок).
 
     def _device_pixel_ratio(self) -> float:
         dpr = self.devicePixelRatioF()
@@ -107,29 +112,51 @@ class PageWidget(QtWidgets.QWidget):
         screen = QtWidgets.QApplication.primaryScreen()
         return screen.devicePixelRatio() if screen else 1.0
 
-    def _render(self):
-        dpr        = self._device_pixel_ratio()
-        # Logical matrix used for coordinate math (no DPR — stays in logical px space)
-        logic_mat  = fitz.Matrix(self._scale, self._scale).prerotate(self._rotation)
-        # Render matrix uses DPR multiplier for sharp physical pixels
-        render_mat = fitz.Matrix(self._scale * dpr, self._scale * dpr).prerotate(self._rotation)
-        pix = self._page.get_pixmap(matrix=render_mat, alpha=False)
-        img = QtGui.QImage(pix.samples, pix.width, pix.height,
-                           pix.stride, QtGui.QImage.Format_RGB888)
-        img.setDevicePixelRatio(dpr)
-        self._pixmap = QtGui.QPixmap.fromImage(img)
-        logical = self._pixmap.deviceIndependentSize().toSize()
-        self._logical_w = float(logical.width())
-        self._logical_h = float(logical.height())
-        self.setFixedSize(logical)
+    def _init_metrics(self):
+        """Розмір віджета, координатна матриця та текстовий шар — без рендеру пікселів."""
+        logic_mat = fitz.Matrix(self._scale, self._scale).prerotate(self._rotation)
         # Normalisation offset: prerotate shifts coords into negative space;
         # PyMuPDF's get_pixmap translates back, so we must match it.
         rect_t = self._page.rect * logic_mat
         self._coord_mat   = logic_mat
         self._coord_off_x = -rect_t.x0
         self._coord_off_y = -rect_t.y0
+        self._logical_w   = rect_t.width
+        self._logical_h   = rect_t.height
+        self.setFixedSize(round(self._logical_w), round(self._logical_h))
         self._load_words()
         self._recompute_search_widget_rects()
+
+    def ensure_pixmap(self):
+        """Рендерить растр сторінки, якщо ще не відрендерено. Викликається лише
+        для сторінок, що потрапили у видиму область (див. ScreenViewer._update_visible_pages)."""
+        if self._pixmap is not None:
+            return
+        dpr        = self._device_pixel_ratio()
+        render_mat = fitz.Matrix(self._scale * dpr, self._scale * dpr).prerotate(self._rotation)
+        pix = self._page.get_pixmap(matrix=render_mat, alpha=False)
+        img = QtGui.QImage(pix.samples, pix.width, pix.height,
+                           pix.stride, QtGui.QImage.Format_RGB888)
+        img.setDevicePixelRatio(dpr)
+        self._pixmap = QtGui.QPixmap.fromImage(img)
+        self.update()
+
+    def release_pixmap(self):
+        """Звільняє растр сторінки, що давно поза видимою областю — обмежує пам'ять
+        на великих документах. Розмір/текстовий шар лишаються — скрол не зсувається."""
+        if self._pixmap is not None:
+            self._pixmap = None
+            self.update()
+
+    def _rerender_if_was_visible(self):
+        """Після зміни scale/rotation: перерахувати метрики і, якщо растр уже був
+        відрендерений (сторінка видима), одразу оновити його — інакше лишити лінивим."""
+        had_pixmap = self._pixmap is not None
+        self._pixmap = None
+        self._init_metrics()
+        if had_pixmap:
+            self.ensure_pixmap()
+        self.update()
 
     def _pdf_point_to_widget(self, x: float, y: float) -> QtCore.QPointF:
         pt = fitz.Point(x, y) * self._coord_mat
@@ -172,8 +199,7 @@ class PageWidget(QtWidgets.QWidget):
         self._sel_end       = None
         self._highlighted.clear()
         self._selected_text = ""
-        self._render()
-        self.update()
+        self._rerender_if_was_visible()
 
     def set_rotation(self, degrees: int):
         self._rotation      = degrees % 360
@@ -181,8 +207,7 @@ class PageWidget(QtWidgets.QWidget):
         self._sel_end       = None
         self._highlighted.clear()
         self._selected_text = ""
-        self._render()
-        self.update()
+        self._rerender_if_was_visible()
 
     # ── selection ─────────────────────────────────────────────────────────────
 
@@ -336,6 +361,8 @@ class PageWidget(QtWidgets.QWidget):
         p = QtGui.QPainter(self)
         if self._pixmap:
             p.drawPixmap(0, 0, self._pixmap)
+        else:
+            p.fillRect(self.rect(), QtGui.QColor(255, 255, 255))
         if self._highlighted:
             sel_c = QtGui.QColor(THEME_MGR.get().selection_color)
             sel_c.setAlpha(90)
@@ -867,12 +894,17 @@ class ScreenViewer(QtWidgets.QWidget):
         save_btn.clicked.connect(self._export_pdf)
         layout.addWidget(save_btn)
 
+        ocr_btn = _ToolbarButton("ocr")
+        ocr_btn.setToolTip("Розпізнати текст (OCR) — для сканованих PDF без текстового шару")
+        ocr_btn.clicked.connect(self._run_ocr)
+        layout.addWidget(ocr_btn)
+
         layout.addSpacing(10)
         self._lbl_file = _ElidingLabel("")
         self._lbl_file.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
         layout.addWidget(self._lbl_file, 1)
 
-        return layout, [self._thumb_toggle_btn, info_btn, save_btn]
+        return layout, [self._thumb_toggle_btn, info_btn, save_btn, ocr_btn]
 
     def _build_toolbar_center(self) -> QtWidgets.QHBoxLayout:
         """Лічильник сторінок; тут-таки створюються кнопки зуму (живуть у статус-барі,
@@ -950,6 +982,7 @@ class ScreenViewer(QtWidgets.QWidget):
         self._scroll.setWidget(self._container)
         self._scroll.viewport().installEventFilter(self)
         self._scroll.verticalScrollBar().valueChanged.connect(self._update_current_page)
+        self._scroll.verticalScrollBar().valueChanged.connect(self._update_visible_pages)
 
         return self._scroll
 
@@ -1168,6 +1201,7 @@ class ScreenViewer(QtWidgets.QWidget):
             self._pages.append(pw)
 
         self._rebuild_page_layout()
+        self._update_visible_pages()
 
     def _on_page_clicked(self, source: PageWidget):
         for pw in self._pages:
@@ -1205,6 +1239,7 @@ class ScreenViewer(QtWidgets.QWidget):
 
         self._apply_page_visibility()
         self._vbox.activate()
+        self._update_visible_pages()
 
     def _apply_page_visibility(self):
         if self._page_mode == "single":
@@ -1213,6 +1248,47 @@ class ScreenViewer(QtWidgets.QWidget):
         else:
             for pw in self._pages:
                 pw.setVisible(True)
+
+    # ── virtualization: рендеримо растр лише для сторінок у видимій області ────
+
+    def _update_visible_pages(self):
+        """Викликати після будь-якої зміни, що впливає на видиму область: скрол,
+        зміна режиму сторінок, навігація, зум, resize. Рендерить растр сторінок,
+        що зараз (чи скоро) видимі, і звільняє растр решти — щоб пам'ять і час
+        відкриття не залежали від кількості сторінок у документі."""
+        if not self._pages:
+            return
+        if self._page_mode == "single":
+            self._update_visible_pages_paged(span=1)
+        elif self._page_mode == "two":
+            self._update_visible_pages_paged(span=2)
+        else:
+            self._update_visible_pages_continuous()
+
+    def _update_visible_pages_paged(self, span: int):
+        """single/two-up: тримаємо відрендерованою поточну сторінку(и) + по одній
+        сторінці буфера з кожного боку (для миттєвого prev/next)."""
+        keep_lo = max(0, self._current_page - 1)
+        keep_hi = min(len(self._pages), self._current_page + span + 1)
+        for i, pw in enumerate(self._pages):
+            if keep_lo <= i < keep_hi:
+                pw.ensure_pixmap()
+            else:
+                pw.release_pixmap()
+
+    def _update_visible_pages_continuous(self):
+        """continuous: рендеримо сторінки в межах viewport + буфер в один екран
+        зверху/знизу (плавний скрол без помітного "дорендерування")."""
+        viewport = self._scroll.viewport()
+        buffer_px = max(viewport.height(), 1)
+        visible_rect = viewport.rect().adjusted(0, -buffer_px, 0, buffer_px)
+        for pw in self._pages:
+            top_left = pw.mapTo(viewport, QtCore.QPoint(0, 0))
+            pw_rect = QtCore.QRect(top_left, pw.size())
+            if visible_rect.intersects(pw_rect):
+                pw.ensure_pixmap()
+            else:
+                pw.release_pixmap()
 
     def _scroll_anchor(self, page_num: int) -> QtWidgets.QWidget:
         """Widget whose .pos().y() should be used to scroll to page_num —
@@ -1233,6 +1309,7 @@ class ScreenViewer(QtWidgets.QWidget):
         else:
             anchor = self._scroll_anchor(page_num)
             self._scroll.verticalScrollBar().setValue(anchor.pos().y())
+        self._update_visible_pages()
 
     # ── current page tracking ─────────────────────────────────────────────────
 
@@ -1292,6 +1369,7 @@ class ScreenViewer(QtWidgets.QWidget):
         for pw in self._pages:
             pw.rescale(new_scale)
         self._update_zoom_label()
+        self._update_visible_pages()
 
     def _update_zoom_label(self):
         self._lbl_zoom.setText(f"{round(self._scale / _SCALE_100 * 100)}%")
@@ -1330,6 +1408,69 @@ class ScreenViewer(QtWidgets.QWidget):
             new_doc.close()
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Помилка", f"Не вдалося зберегти:\n{e}")
+
+    # ── OCR: розпізнавання тексту для сканованих PDF ─────────────────────────
+
+    def _run_ocr(self):
+        if not self._doc or not self._path:
+            return
+        if not ocr.tesseract_available():
+            QtWidgets.QMessageBox.warning(
+                self, "OCR недоступний",
+                "Для розпізнавання тексту потрібен tesseract, якого не знайдено в системі.\n\n"
+                "macOS: brew install tesseract tesseract-lang\n"
+                "Windows: встанови з https://github.com/UB-Mannheim/tesseract/wiki",
+            )
+            return
+
+        if ocr.has_text_layer(self._doc) and QtWidgets.QMessageBox.question(
+            self, "Текст уже є",
+            "Схоже, документ уже має текстовий шар. Розпізнати текст все одно?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        ) != QtWidgets.QMessageBox.Yes:
+            return
+
+        default = self._path.replace(".pdf", "_ocr.pdf")
+        out_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Зберегти розпізнаний PDF", default, "PDF (*.pdf)"
+        )
+        if not out_path:
+            return
+
+        lang  = ocr.pick_language()
+        total = self._doc.page_count
+        progress = QtWidgets.QProgressDialog(
+            "Розпізнавання тексту…", "Скасувати", 0, total, self
+        )
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setMinimumDuration(0)
+
+        def on_progress(done: int, total_pages: int) -> bool:
+            progress.setLabelText(f"Сторінка {done} з {total_pages}…")
+            progress.setValue(done)
+            QtWidgets.QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        try:
+            ocr_doc = ocr.ocr_document(self._doc, lang, progress_cb=on_progress)
+        except ocr.OcrError as e:
+            progress.close()
+            if not progress.wasCanceled():
+                QtWidgets.QMessageBox.critical(self, "Помилка OCR", str(e))
+            return
+        progress.close()
+
+        try:
+            ocr_doc.save(out_path, garbage=4, deflate=True)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Помилка збереження", f"{e}")
+            return
+        finally:
+            ocr_doc.close()
+
+        QtWidgets.QMessageBox.information(
+            self, "Готово", f"Розпізнаний PDF збережено:\n{out_path}"
+        )
 
     # ── document info dialog ──────────────────────────────────────────────────
 
@@ -1503,6 +1644,7 @@ class ScreenViewer(QtWidgets.QWidget):
         for i, pw in enumerate(self._pages):
             if i > 0:
                 printer.newPage()
+            pw.ensure_pixmap()   # друк потребує растру кожної сторінки, не лише видимих
             if pw.pixmap:
                 scaled = pw.pixmap.scaled(
                     page_rect.size(),
@@ -1563,6 +1705,8 @@ class ScreenViewer(QtWidgets.QWidget):
             elif t == QtCore.QEvent.KeyPress:
                 if self._handle_nav_key(event.key()):
                     return True
+            elif t == QtCore.QEvent.Resize:
+                self._update_visible_pages()
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event):

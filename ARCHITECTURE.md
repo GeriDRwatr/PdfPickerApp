@@ -13,9 +13,10 @@ Stack: **PySide6 + PyMuPDF (fitz)**. All UI custom-painted (paintEvent). No Qt D
 | `app/constants.py` | `group_color(n)` reads THEME_MGR; fixed color constants |
 | `app/pdf_utils.py` | `clear_layout` · `safe_thumbnail_render` |
 | `app/docx_convert.py` | `docx_to_html()` · `list_type()` — чиста конвертація docx.Document → HTML, без Qt (тестується юніт-тестами) |
+| `app/ocr.py` | `ocr_document()` · `tesseract_available()` · `pick_language()` — OCR сканованих PDF через системний tesseract (subprocess, без pytesseract/Pillow); викликається з тулбару ScreenViewer |
 | `app/platform.py` | `register_as_pdf_viewer()` · `set_title_bar_color()` — Windows-only; no-op elsewhere |
 | `app/ui/icons/` | **Python package** — unified icon renderer: `draw(p,rect,name,color)` auto-selects Lucide SVG or hand-drawn vector; `sf_font(px,w)` |
-| `app/ui/icons/svg/` | 24 Lucide SVG files bundled with the package |
+| `app/ui/icons/svg/` | 28 Lucide SVG files bundled with the package |
 | `app/ui/widgets.py` | All reusable thumbnail/card widgets (see Widgets section) |
 | `app/screens/window.py` | `ScreenMain` · `DropZone` · `NavButton` · `DrillDownPanel` · `ComingSoonWidget` |
 | `app/screens/merge.py` | `ScreenMergeMulti` — split/merge editor |
@@ -24,7 +25,7 @@ Stack: **PySide6 + PyMuPDF (fitz)**. All UI custom-painted (paintEvent). No Qt D
 | `app/screens/word_editor.py` | `WordEditor` — embedded .docx editor (workspace screen) |
 | `app/theme.json` | Saved theme overrides — runtime, gitignored |
 | `window_state.json` | Saved window size — runtime, gitignored |
-| `tests/` | pytest-юніт-тести для чистої логіки (`docx_convert`, `pdf_utils`, `theme`) |
+| `tests/` | pytest-юніт-тести для чистої логіки (`docx_convert`, `pdf_utils`, `theme`, `ocr`) |
 | `pyproject.toml` | Конфіг `ruff` (lint+format), `mypy`, `pytest` |
 
 ### Linux packaging (`linux/`)

@@ -30,7 +30,8 @@ app/theme.json
 *.pdf
 
 # IDE / OS
-.claude/
+.claude/*
+!.claude/settings.json
 .vscode/
 .idea/
 *.swp

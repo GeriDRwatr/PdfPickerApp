@@ -78,8 +78,10 @@ class PageWidget(QtWidgets.QWidget):
         self._scale         = scale
         self._pixmap:       QtGui.QPixmap | None                       = None
         self._words:        list[tuple[QtCore.QRectF, str, int, int]] = []
+        self._chars:        list[tuple[QtCore.QRectF, str, int, int]] = []
         self._sel_start:    QtCore.QPointF | None           = None
         self._sel_end:      QtCore.QPointF | None           = None
+        self._sel_block_no: int | None                      = None
         self._highlighted:  list[QtCore.QRectF]             = []
         self._selected_text = ""
         self._click_count   = 0
@@ -125,6 +127,7 @@ class PageWidget(QtWidgets.QWidget):
         self._logical_h   = rect_t.height
         self.setFixedSize(round(self._logical_w), round(self._logical_h))
         self._load_words()
+        self._load_chars()
         self._recompute_search_widget_rects()
 
     def ensure_pixmap(self):
@@ -135,8 +138,11 @@ class PageWidget(QtWidgets.QWidget):
         dpr        = self._device_pixel_ratio()
         render_mat = fitz.Matrix(self._scale * dpr, self._scale * dpr).prerotate(self._rotation)
         pix = self._page.get_pixmap(matrix=render_mat, alpha=False)
+        # .copy(): QImage(pix.samples, ...) only wraps fitz's raw buffer,
+        # which is freed once `pix` is garbage-collected — see pdf_utils.py's
+        # safe_thumbnail_render for the full explanation.
         img = QtGui.QImage(pix.samples, pix.width, pix.height,
-                           pix.stride, QtGui.QImage.Format_RGB888)
+                           pix.stride, QtGui.QImage.Format_RGB888).copy()
         img.setDevicePixelRatio(dpr)
         self._pixmap = QtGui.QPixmap.fromImage(img)
         self.update()
@@ -193,10 +199,45 @@ class PageWidget(QtWidgets.QWidget):
                 text, block_no, line_no,
             ))
 
+    def _load_chars(self):
+        """Per-character bounding boxes — used for character-precise drag
+        selection, scoped to a single block (see _update_highlight). Word-
+        level self._words is unchanged and still drives double/triple/
+        quadruple-click selection. block_no here only needs to be internally
+        consistent (it numbers text blocks in this extraction pass); it does
+        not need to match _words' block_no values."""
+        self._chars.clear()
+        d = self._page.get_text("rawdict")
+        block_no = 0
+        for block in d.get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            for line_no, line in enumerate(block.get("lines", [])):
+                for span in line.get("spans", []):
+                    for ch in span.get("chars", []):
+                        x0, y0, x1, y1 = ch["bbox"]
+                        self._chars.append((
+                            self._pdf_rect_to_widget((x0, y0, x1, y1)),
+                            ch["c"], block_no, line_no,
+                        ))
+            block_no += 1
+
+    def _block_at(self, pos: QtCore.QPointF) -> int | None:
+        """Text block under pos, or the nearest one if pos isn't exactly on
+        a character (e.g. clicked between glyphs or in line spacing)."""
+        if not self._chars:
+            return None
+        for r, _c, b, _l in self._chars:
+            if r.contains(pos):
+                return b
+        nearest = min(self._chars, key=lambda item: (item[0].center() - pos).manhattanLength())
+        return nearest[2]
+
     def rescale(self, scale: float):
         self._scale         = scale
         self._sel_start     = None
         self._sel_end       = None
+        self._sel_block_no  = None
         self._highlighted.clear()
         self._selected_text = ""
         self._rerender_if_was_visible()
@@ -205,6 +246,7 @@ class PageWidget(QtWidgets.QWidget):
         self._rotation      = degrees % 360
         self._sel_start     = None
         self._sel_end       = None
+        self._sel_block_no  = None
         self._highlighted.clear()
         self._selected_text = ""
         self._rerender_if_was_visible()
@@ -214,6 +256,7 @@ class PageWidget(QtWidgets.QWidget):
     def clear_selection(self):
         self._sel_start     = None
         self._sel_end       = None
+        self._sel_block_no  = None
         self._highlighted.clear()
         self._selected_text = ""
         self.update()
@@ -226,16 +269,73 @@ class PageWidget(QtWidgets.QWidget):
     def selected_text(self) -> str:
         return self._selected_text
 
+    def _char_rows(self, block_no: int | None) -> list[list[tuple[QtCore.QRectF, str]]]:
+        """Characters of one block, grouped into visual rows (lines), top to
+        bottom. Scoping to a single block keeps a drag from jumping into an
+        unrelated column/cell that happens to sit at a similar height (e.g. a
+        form label next to a multi-line value in an invoice layout)."""
+        rows: dict[int, list[tuple[QtCore.QRectF, str]]] = {}
+        for r, c, b, ln in self._chars:
+            if b != block_no:
+                continue
+            rows.setdefault(ln, []).append((r, c))
+        ordered = sorted(rows.values(), key=lambda row: min(r.top() for r, _ in row))
+        return [sorted(row, key=lambda rc: rc[0].left()) for row in ordered]
+
     def _update_highlight(self):
+        """Flow selection, character-precise and scoped to the block the
+        drag started in — like a text editor / PDF-XChange Editor: dragging
+        past the end of a line continues on the full width of the lines in
+        between (within that same block only), then from the left edge of
+        the last line up to the cursor."""
         if not (self._sel_start and self._sel_end):
             self._highlighted.clear()
             self._selected_text = ""
             return
-        rb   = QtCore.QRectF(self._sel_start, self._sel_end).normalized()
-        hits = [(r, t) for r, t, _b, _l in self._words if r.intersects(rb)]
-        hits.sort(key=lambda x: (round(x[0].top(), 1), x[0].left()))
-        self._highlighted   = [r for r, _ in hits]
-        self._selected_text = " ".join(t for _, t in hits)
+
+        p0, p1 = self._sel_start, self._sel_end
+        if (p1.y(), p1.x()) < (p0.y(), p0.x()):
+            p0, p1 = p1, p0
+
+        rows = self._char_rows(self._sel_block_no)
+        if not rows:
+            self._highlighted.clear()
+            self._selected_text = ""
+            return
+
+        row_bounds = [(min(r.top() for r, _ in row), max(r.bottom() for r, _ in row))
+                      for row in rows]
+
+        def row_index_for_y(y: float) -> int:
+            for i, (top, bottom) in enumerate(row_bounds):
+                if top <= y <= bottom:
+                    return i
+            return min(range(len(row_bounds)), key=lambda i: abs(row_bounds[i][0] - y))
+
+        start_i = row_index_for_y(p0.y())
+        end_i   = row_index_for_y(p1.y())
+        if start_i > end_i:
+            start_i, end_i = end_i, start_i
+        same_row = start_i == end_i
+
+        highlighted: list[QtCore.QRectF] = []
+        row_texts: list[str] = []
+        for i in range(start_i, end_i + 1):
+            row = rows[i]
+            if same_row:
+                lo, hi = min(p0.x(), p1.x()), max(p0.x(), p1.x())
+                picked = [(r, c) for r, c in row if lo <= r.center().x() <= hi]
+            elif i == start_i:
+                picked = [(r, c) for r, c in row if r.center().x() >= p0.x()]
+            elif i == end_i:
+                picked = [(r, c) for r, c in row if r.center().x() <= p1.x()]
+            else:
+                picked = row
+            highlighted.extend(r for r, _ in picked)
+            row_texts.append("".join(c for _, c in picked))
+
+        self._highlighted   = highlighted
+        self._selected_text = " ".join(t for t in row_texts if t)
 
     def _select_word(self, pos: QtCore.QPointF):
         for rect, text, _b, _l in self._words:
@@ -296,6 +396,7 @@ class PageWidget(QtWidgets.QWidget):
         else:
             self._sel_start     = pos
             self._sel_end       = pos
+            self._sel_block_no  = self._block_at(pos)
             self._highlighted.clear()
             self._selected_text = ""
 
@@ -1314,21 +1415,30 @@ class ScreenViewer(QtWidgets.QWidget):
     # ── current page tracking ─────────────────────────────────────────────────
 
     def _update_current_page(self):
+        """"Current page" = whichever page covers the most of the viewport
+        right now. A top-vs-viewport-midpoint comparison (the previous
+        approach) silently picks the *next* page whenever the page in view
+        is shorter than half the viewport — landscape/rotated pages included
+        — because the midpoint then falls past that short page's bottom
+        edge. Overlap area is correct regardless of page height."""
         if not self._pages or not self._doc or self._page_mode == "single":
             return
-        vp_mid = (self._scroll.verticalScrollBar().value()
-                  + self._scroll.viewport().height() / 2)
-        best = 0
-        last_anchor = None
+        vp_top    = self._scroll.verticalScrollBar().value()
+        vp_bottom = vp_top + self._scroll.viewport().height()
+        best         = 0
+        best_overlap = -1.0
+        last_anchor  = None
         for i in range(len(self._pages)):
             anchor = self._scroll_anchor(i)
             if anchor is last_anchor:
                 continue            # same row (two-up mode) — already counted
             last_anchor = anchor
-            if anchor.pos().y() <= vp_mid:
+            top    = anchor.pos().y()
+            bottom = top + anchor.height()
+            overlap = min(bottom, vp_bottom) - max(top, vp_top)
+            if overlap > best_overlap:
+                best_overlap = overlap
                 best = i
-            else:
-                break
         self._current_page = best
         self._lbl_pages.setText(f"{best + 1}/{self._doc.page_count}")
         self.current_page_changed.emit(best)
@@ -1377,14 +1487,53 @@ class ScreenViewer(QtWidgets.QWidget):
     # ── view rotation (current page only) ────────────────────────────────────
 
     def _rotate_view(self):
-        """Rotate the page currently in view by 90° (view-only, not saved to file)."""
+        """Rotate the page currently in view by 90° (view-only, not saved to file).
+        Always targets whichever page is on screen right now, and stays
+        pinned to that same page across repeated clicks — it only moves on
+        once you actually scroll to a different one.
+
+        Rotating changes this page's height (portrait <-> landscape), which
+        changes the scroll area's total content height. Qt reacts to that via
+        one or more *posted* LayoutRequest events — processed on a later
+        event-loop turn, not synchronously — which recalculate the
+        scrollbar's range and, since the old scroll value can now exceed the
+        new (shrunk) maximum, clamp it. That clamp fires valueChanged, which
+        re-derives "current page" from the new scroll position, silently
+        dragging _current_page onto a neighboring page — sometimes on the
+        very next event-loop turn, after this method has already returned,
+        so a single post-hoc reassignment isn't always enough to catch it."""
         if not self._pages:
             return
-        pw = self._pages[self._current_page]
+        page_num = self._current_page
+        pw = self._pages[page_num]
         pw.set_rotation(pw._rotation + 90)
-        self._rebuild_page_layout()
-        self._go_to_page(self._current_page)
-        self.page_rotation_changed.emit(self._current_page, pw._rotation)
+
+        sb = self._scroll.verticalScrollBar()
+        sb.valueChanged.disconnect(self._update_current_page)
+        try:
+            self._rebuild_page_layout()
+            # Flush any pending layout settling now, while the signal above
+            # can't act on it, instead of letting it land after we return.
+            QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.LayoutRequest)
+            self._go_to_page(page_num)
+        finally:
+            sb.valueChanged.connect(self._update_current_page)
+
+        self._pin_current_page(page_num)
+        self.page_rotation_changed.emit(page_num, pw._rotation)
+        # Safety net: a second, cascading LayoutRequest can still be pending
+        # after the flush above (parent-then-scrollarea settling in two
+        # passes) and fire once we're back in the event loop — re-pin once
+        # more on the very next turn, before the user could plausibly click
+        # rotate again.
+        QtCore.QTimer.singleShot(0, lambda: self._pin_current_page(page_num))
+
+    def _pin_current_page(self, page_num: int):
+        if page_num >= len(self._pages):
+            return
+        self._current_page = page_num
+        if self._doc:
+            self._lbl_pages.setText(f"{page_num + 1}/{self._doc.page_count}")
 
     # ── export PDF with rotations applied ────────────────────────────────────
 

@@ -26,14 +26,19 @@ def safe_thumbnail_render(page, matrix) -> QtGui.QPixmap:
 
     try:
         pix = page.get_pixmap(matrix=matrix, alpha=False)
+        # .copy() forces an immediate, independent copy of the pixel data —
+        # QImage(pix.samples, ...) only wraps fitz's raw buffer, which is
+        # freed once `pix` is garbage-collected. Without the copy, painting
+        # this image later can read freed/reused memory (typically showing
+        # whatever the *next* same-sized render wrote there instead).
         img = QtGui.QImage(pix.samples, pix.width, pix.height,
-                           pix.stride, QtGui.QImage.Format_RGB888)
+                           pix.stride, QtGui.QImage.Format_RGB888).copy()
         return QtGui.QPixmap.fromImage(img)
     except Exception:
         try:
             pix = page.get_pixmap(matrix=matrix, alpha=True)
             img = QtGui.QImage(pix.samples, pix.width, pix.height,
-                               pix.stride, QtGui.QImage.Format_ARGB32)
+                               pix.stride, QtGui.QImage.Format_ARGB32).copy()
             return QtGui.QPixmap.fromImage(img)
         except Exception:
             return fallback

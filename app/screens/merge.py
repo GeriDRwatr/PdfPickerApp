@@ -14,6 +14,8 @@ from ..ui.widgets import (
     GroupButton,
     GroupDeck,
     ThumbnailActionButton,
+    ZoomHintBubble,
+    ZoomPreview,
 )
 
 _log = logging.getLogger(__name__)
@@ -36,7 +38,8 @@ class ScreenMergeMulti(QtWidgets.QWidget):
         self.page_rotations: list[int]             = []   # degrees: 0, 90, 180, 270
         self.group_names:    dict[int, str]        = {}   # group_num → output filename
 
-        self._active_group = 1
+        self._active_group   = 1
+        self._expanded_group: int | None = None   # group currently shown flat (not as a deck)
         self._num_groups   = 4
         self._group_btns: list[GroupButton] = []
         self._btn_group = QtWidgets.QButtonGroup(self)
@@ -52,6 +55,12 @@ class ScreenMergeMulti(QtWidgets.QWidget):
         self._pixmap_cache: OrderedDict = OrderedDict()
         self._page_ar_cache: dict      = {}    # (path, actual_i) → float  w/h ratio
         self._undo_stack:   deque      = deque(maxlen=50)
+
+        self._zoom_hint    = ZoomHintBubble()   # ctrl+клік hover hint
+        # Збільшене прев'ю — свіжий екземпляр на кожен показ (див. ZoomPreview
+        # docstring): жодного застарілого стану native-вікна між показами.
+        self._zoom_preview: ZoomPreview | None = None
+        self._zoom_pixmap_cache: OrderedDict = OrderedDict()   # (path, actual_i, rot) → QPixmap
 
         self._render_timer = QtCore.QTimer(self)
         self._render_timer.setSingleShot(True)
@@ -95,7 +104,8 @@ class ScreenMergeMulti(QtWidgets.QWidget):
         self.page_list.clear()
         self.page_groups.clear()
         self.page_rotations.clear()
-        self._active_group = 1
+        self._active_group   = 1
+        self._expanded_group = None
         self.group_names.clear()
         self._drag_src     = None
         self._drop_idx     = None
@@ -103,6 +113,9 @@ class ScreenMergeMulti(QtWidgets.QWidget):
         self._dragged_card = None   # card lives in grid; clear_layout below handles deletion
         self._pixmap_cache.clear()
         self._page_ar_cache.clear()
+        self._zoom_pixmap_cache.clear()
+        self.hide_zoom_hint()
+        self.end_zoom_preview()
         self._reset_group_buttons()
         clear_layout(self.thumbs_grid)
         self._update_header()
@@ -357,6 +370,22 @@ class ScreenMergeMulti(QtWidgets.QWidget):
     # ── events ────────────────────────────────────────────────────────────────
 
     def eventFilter(self, obj, event):
+        # Installed application-wide only while a zoom preview is open (see
+        # begin_zoom_preview/_discard_zoom_preview). A press anywhere except
+        # on the preview itself closes it; the click still reaches its real
+        # target below (we don't consume the event, just react to it).
+        #
+        # Checked by global click position, not by `obj is self._zoom_preview`:
+        # a Qt.ToolTip-flagged top-level window doesn't reliably receive the
+        # native mouse-press itself on Windows (the OS can route the click to
+        # whatever's underneath even though the tooltip is on top visually),
+        # so an identity check would see `obj` as something else and close
+        # the preview on a click aimed squarely at it.
+        if event.type() == QtCore.QEvent.MouseButtonPress and self._zoom_preview is not None:
+            gpos = (event.globalPosition().toPoint() if hasattr(event, "globalPosition")
+                    else event.globalPos())
+            if not self._zoom_preview.frameGeometry().contains(gpos):
+                self.end_zoom_preview()
         if obj is self.scroll.viewport():
             t = event.type()
             if t == QtCore.QEvent.Resize:
@@ -407,6 +436,9 @@ class ScreenMergeMulti(QtWidgets.QWidget):
                 _log.debug("Не вдалося закрити документ", exc_info=True)
         self.doc_cache.clear()
         self._pixmap_cache.clear()
+        self._zoom_pixmap_cache.clear()
+        self._zoom_hint.close()
+        self._discard_zoom_preview()
         super().closeEvent(event)
 
     def set_group_name(self, group_num: int, name: str):
@@ -431,7 +463,11 @@ class ScreenMergeMulti(QtWidgets.QWidget):
         self._render_timer.start(0)
         self.scroll.viewport().setFocus()
 
-    _PIXMAP_CACHE_MAX = 200
+    _PIXMAP_CACHE_MAX      = 200
+    _ZOOM_CACHE_MAX        = 40
+    _ZOOM_FACTOR           = 2.72   # наскільки більшим показується прев'ю відносно мініатюри
+    _ZOOM_RENDER_OVERSAMPLE = 1.5   # запас чіткості джерела понад розмір показу
+    _ZOOM_RENDER_SCALE     = THUMB_SCALE * _ZOOM_FACTOR * _ZOOM_RENDER_OVERSAMPLE
 
     def _get_pixmap(self, path: str, actual_i: int, mat, rotation: int = 0) -> QtGui.QPixmap:
         key = (path, actual_i, rotation)
@@ -447,6 +483,65 @@ class ScreenMergeMulti(QtWidgets.QWidget):
             self._pixmap_cache.popitem(last=False)
         return pixmap
 
+    def _get_zoom_source_pixmap(self, path: str, actual_i: int, rotation: int = 0) -> QtGui.QPixmap:
+        """Чіткіше джерело для ZoomPreview (вищий рендер-scale, ніж у мініатюр)."""
+        key = (path, actual_i, rotation)
+        if key in self._zoom_pixmap_cache:
+            self._zoom_pixmap_cache.move_to_end(key)
+            return self._zoom_pixmap_cache[key]
+        mat    = fitz.Matrix(self._ZOOM_RENDER_SCALE, self._ZOOM_RENDER_SCALE).prerotate(rotation)
+        pixmap = safe_thumbnail_render(self.get_doc(path).load_page(actual_i), mat)
+        self._zoom_pixmap_cache[key] = pixmap
+        if len(self._zoom_pixmap_cache) > self._ZOOM_CACHE_MAX:
+            self._zoom_pixmap_cache.popitem(last=False)
+        return pixmap
+
+    # ── ctrl+клік hover hint / збільшене прев'ю (DraggableCard interface) ───────
+
+    def show_zoom_hint(self, global_pos: QtCore.QPoint):
+        self._zoom_hint.show_near(global_pos)
+
+    def move_zoom_hint(self, global_pos: QtCore.QPoint):
+        if self._zoom_hint.isVisible():
+            self._zoom_hint.show_near(global_pos)
+
+    def hide_zoom_hint(self):
+        self._zoom_hint.hide()
+
+    def _workspace_center(self) -> QtCore.QPoint:
+        """Центр цього екрана (робочої області) в глобальних координатах —
+        збільшене прев'ю завжди відкривається тут, а не біля курсору."""
+        return self.mapToGlobal(self.rect().center())
+
+    def begin_zoom_preview(self, visual_i: int, thumb_w: int, thumb_h: int,
+                            global_pos: QtCore.QPoint):
+        if visual_i >= len(self.page_list):
+            return
+        self.hide_zoom_hint()
+        path, ai = self.page_list[visual_i]
+        rotation = self.page_rotations[visual_i]
+        pixmap   = self._get_zoom_source_pixmap(path, ai, rotation)
+        target_w = max(1, int(thumb_w * self._ZOOM_FACTOR))
+        target_h = max(1, int(thumb_h * self._ZOOM_FACTOR))
+        self._discard_zoom_preview()
+        self._zoom_preview = ZoomPreview()
+        self._zoom_preview.show_pixmap(pixmap, target_w, target_h, self._workspace_center())
+        # Stays open after the mouse is released — only a click outside its
+        # bounds closes it, caught here via a global filter since that click
+        # can land on any widget in the app (a thumbnail, a sidebar button,
+        # blank canvas, ...).
+        QtWidgets.QApplication.instance().installEventFilter(self)
+
+    def end_zoom_preview(self):
+        self._discard_zoom_preview()
+
+    def _discard_zoom_preview(self):
+        if self._zoom_preview is not None:
+            QtWidgets.QApplication.instance().removeEventFilter(self)
+            self._zoom_preview.close()
+            self._zoom_preview.deleteLater()
+            self._zoom_preview = None
+
     def _get_page_ar(self, path: str, actual_i: int) -> float:
         """Return native page aspect ratio (width/height) accounting for PDF /Rotate."""
         key = (path, actual_i)
@@ -457,12 +552,25 @@ class ScreenMergeMulti(QtWidgets.QWidget):
 
     # ── DraggableCard interface ────────────────────────────────────────────────
 
-    def toggle_page_group(self, visual_i: int):
+    def add_to_active_group(self, visual_i: int):
+        """Left-click: assign an unassigned page to the active group — the
+        deck forms/grows immediately (see _build_render_items). Already-
+        grouped pages are left alone; removal is a dedicated right-click
+        action now (see remove_from_group), not a second left-click."""
         if visual_i >= len(self.page_groups) or self._active_group is None:
             return
+        if self.page_groups[visual_i] is not None:
+            return
         self._push_undo()
-        cur = self.page_groups[visual_i]
-        self.page_groups[visual_i] = None if cur == self._active_group else self._active_group
+        self.page_groups[visual_i] = self._active_group
+        self._render_timer.start(0)
+
+    def remove_from_group(self, visual_i: int):
+        """Right-click: unassign a page from whatever group it belongs to."""
+        if visual_i >= len(self.page_groups) or self.page_groups[visual_i] is None:
+            return
+        self._push_undo()
+        self.page_groups[visual_i] = None
         self._render_timer.start(0)
 
     def rotate_page(self, visual_i: int):
@@ -473,6 +581,7 @@ class ScreenMergeMulti(QtWidgets.QWidget):
         path, ai = self.page_list[visual_i]
         for rot in (0, 90, 180, 270):
             self._pixmap_cache.pop((path, ai, rot), None)
+            self._zoom_pixmap_cache.pop((path, ai, rot), None)
         self._render_timer.start(0)
 
     def delete_page(self, visual_i: int):
@@ -485,6 +594,7 @@ class ScreenMergeMulti(QtWidgets.QWidget):
         self.page_rotations.pop(visual_i)
         for rot in (0, 90, 180, 270):
             self._pixmap_cache.pop((path, ai, rot), None)
+            self._zoom_pixmap_cache.pop((path, ai, rot), None)
         if not any(p == path for p, _ in self.page_list):
             self.files.remove(path)
             self._page_ar_cache = {k: v for k, v in self._page_ar_cache.items() if k[0] != path}
@@ -527,7 +637,7 @@ class ScreenMergeMulti(QtWidgets.QWidget):
             if g is None:
                 items.append({'type': 'page', 'visual_i': vi, 'path': path, 'actual_i': ai,
                               'group_num': None, 'rotation': rot})
-            elif g == self._active_group:
+            elif g == self._expanded_group:
                 items.append({'type': 'page', 'visual_i': vi, 'path': path, 'actual_i': ai,
                               'group_num': g, 'rotation': rot})
             elif g not in processed:
@@ -609,6 +719,7 @@ class ScreenMergeMulti(QtWidgets.QWidget):
                         thumb_w, thumb_h, cell_w,
                         file_color, g_color, group_num, rotation=0):
         card = DraggableCard(visual_i, self)
+        card.set_thumb_size(thumb_w, thumb_h)
         card.setFixedSize(cell_w, thumb_h + 60)
         card.setStyleSheet("QFrame{ background: transparent; border-radius: 16px; }")
 
@@ -761,13 +872,37 @@ class ScreenMergeMulti(QtWidgets.QWidget):
         self._group_btns.append(btn)
 
     def _handle_group_click(self, num: int):
-        if self._active_group == num:
+        """Bottom group icon: selects the group as the assignment target for
+        subsequent thumbnail clicks. If the group already has pages
+        (задіяна), this is also the ONLY way to expand it — show its pages
+        flat instead of as a deck — clicking it again re-collapses. Clicking
+        the deck itself no longer expands (see GroupDeck).
+
+        Whether a click expands/collapses is decided by _expanded_group, not
+        _active_group — a group can already be the active *assignment*
+        target (e.g. group 1 is active from app start, or after pages were
+        added to it via thumbnail clicks) without ever having been expanded,
+        so gating on _active_group alone required a spurious first click
+        just to "catch up" before a second click would actually expand it."""
+        is_engaged = any(g == num for g in self.page_groups)
+        if is_engaged:
+            if self._expanded_group == num:
+                self._expanded_group = None
+                self._active_group = None
+                self._btn_group.setExclusive(False)
+                self._group_btns[num - 1].setChecked(False)
+                self._btn_group.setExclusive(True)
+            else:
+                self._active_group = num
+                self._expanded_group = num
+        elif self._active_group == num:
             self._active_group = None
             self._btn_group.setExclusive(False)
             self._group_btns[num - 1].setChecked(False)
             self._btn_group.setExclusive(True)
         else:
             self._active_group = num
+            self._expanded_group = None
         self._render_timer.start(0)
 
     def _on_add_group(self):
@@ -776,7 +911,8 @@ class ScreenMergeMulti(QtWidgets.QWidget):
         self._num_groups += 1
         self._add_group_button(self._num_groups)
         self._group_btns[-1].setChecked(True)
-        self._active_group = self._num_groups
+        self._active_group   = self._num_groups
+        self._expanded_group = None   # brand-new group is always empty
         if self._num_groups >= MAX_GROUPS:
             self._add_group_btn.hide()
         self._render_timer.start(0)
@@ -795,24 +931,6 @@ class ScreenMergeMulti(QtWidgets.QWidget):
         for i in range(1, self._num_groups + 1):
             self._add_group_button(i)
         self._group_btns[0].setChecked(True)
-
-    def collapse_page_group(self, visual_i: int):
-        if visual_i >= len(self.page_groups):
-            return
-        g = self.page_groups[visual_i]
-        if g is None:
-            return
-        self._active_group = None
-        self._btn_group.setExclusive(False)
-        self._group_btns[g - 1].setChecked(False)
-        self._btn_group.setExclusive(True)
-        self._render_timer.start(0)
-
-    def expand_group(self, group_num: int):
-        self._active_group = group_num
-        if group_num <= len(self._group_btns):
-            self._group_btns[group_num - 1].setChecked(True)
-        self._render_timer.start(0)
 
     def select_all(self):
         g = self._active_group if self._active_group is not None else 1

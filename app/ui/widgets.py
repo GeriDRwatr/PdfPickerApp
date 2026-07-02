@@ -1,6 +1,7 @@
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..constants import group_color as _group_color
+from ..theme import THEME_MGR
 from ..ui import icons as _icons
 
 # svg_icons merged into ui.icons — unified draw() dispatches automatically
@@ -94,7 +95,8 @@ class ThumbnailActionButton(_HoverMixin, QtWidgets.QAbstractButton):
 
 class GroupDeck(QtWidgets.QWidget):
     """Анімована стопка карток для згорнутої групи.
-    При hover карточки розсуваються по діагоналі. Клік → screen.expand_group().
+    При hover карточки розсуваються по діагоналі — суто декоративно, клік
+    по колоді нічого не робить (розгортання лише через іконку групи внизу).
     Під колодою — QLineEdit для кастомної назви вихідного файлу."""
 
     MAX_SHADOW = 3
@@ -112,7 +114,6 @@ class GroupDeck(QtWidgets.QWidget):
         self._page_count = len(pixmaps)
         self._spread     = 0.0
         self._color      = _group_color(group_num)
-        self.setCursor(QtCore.Qt.PointingHandCursor)
 
         n_shadow = min(max(len(pixmaps) - 1, 0), self.MAX_SHADOW)
         SO, TP   = self.SO, self.TOP_PAD
@@ -136,10 +137,9 @@ class GroupDeck(QtWidgets.QWidget):
         self._anim.setEasingCurve(QtCore.QEasingCurve.OutCubic)
         self._anim.valueChanged.connect(self._on_anim_value)
 
-        self._x_center    = (cell_w - thumb_w) // 2
-        name_y            = TP + thumb_h + self.MAX_SHADOW * SO + 8
-        total_h           = name_y + 18 + 6
-        self._card_area_h = TP + thumb_h + 12
+        self._x_center = (cell_w - thumb_w) // 2
+        name_y         = TP + thumb_h + self.MAX_SHADOW * SO + 8
+        total_h        = name_y + 18 + 6
         self.setFixedSize(cell_w, total_h)
         self.setAttribute(QtCore.Qt.WA_Hover)
 
@@ -284,12 +284,6 @@ class GroupDeck(QtWidgets.QWidget):
         p.restore()
         p.end()
 
-    def mousePressEvent(self, event):
-        if (event.button() == QtCore.Qt.LeftButton
-                and event.pos().y() <= self._card_area_h):
-            self._screen.expand_group(self._group_num)
-        super().mousePressEvent(event)
-
 
 class FullBorderPaper(QtWidgets.QWidget):
     """Карточка сторінки: білий фон + мініатюра + кольорова рамка.
@@ -392,36 +386,88 @@ class GroupButton(QtWidgets.QAbstractButton):
 
 
 class DraggableCard(QtWidgets.QFrame):
-    """Картка мініатюри з drag-and-drop та кліком для призначення групи."""
+    """Картка мініатюри з drag-and-drop, кліком для призначення групи
+    та ctrl+клік для збільшеного перегляду сторінки (лишається відкритим
+    до кліку деінде — див. ScreenMergeMulti.begin_zoom_preview)."""
 
     def __init__(self, visual_idx: int, screen, parent=None):
         super().__init__(parent)
-        self._visual_idx = visual_idx
-        self._screen     = screen
-        self._drag_start = None
-        self._did_drag   = False
+        self._visual_idx     = visual_idx
+        self._screen         = screen
+        self._drag_start     = None
+        self._did_drag       = False
+        self._ctrl_zoom_press = False   # this press/release cycle opened the preview
+        self._thumb_w        = 0
+        self._thumb_h        = 0
         self.setAcceptDrops(True)
         self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setMouseTracking(True)
+
+    def set_thumb_size(self, thumb_w: int, thumb_h: int):
+        """Розмір відображеної мініатюри — потрібен для розрахунку збільшеного прев'ю."""
+        self._thumb_w = thumb_w
+        self._thumb_h = thumb_h
+
+    def _in_thumb_area(self, pos: QtCore.QPoint) -> bool:
+        """True лише над самою мініатюрою (paper), не над інфо-смужкою з кнопками
+        повороту/видалення під нею — там підказка ctrl+клік не потрібна."""
+        return 0 <= pos.y() < self._thumb_h
+
+    def enterEvent(self, event):
+        if self._in_thumb_area(self.mapFromGlobal(QtGui.QCursor.pos())):
+            self._screen.show_zoom_hint(QtGui.QCursor.pos())
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._screen.hide_zoom_hint()
+        super().leaveEvent(event)
 
     def mousePressEvent(self, event):
+        if (event.button() == QtCore.Qt.LeftButton
+                and event.modifiers() & QtCore.Qt.ControlModifier):
+            self._ctrl_zoom_press = True
+            self._screen.hide_zoom_hint()
+            self._screen.begin_zoom_preview(
+                self._visual_idx, self._thumb_w, self._thumb_h,
+                self.mapToGlobal(event.pos()),
+            )
+            event.accept()
+            return
+        self._ctrl_zoom_press = False
         if event.button() == QtCore.Qt.LeftButton:
             self._drag_start = event.pos()
             self._did_drag   = False
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._ctrl_zoom_press:
+            return
         if (self._drag_start is not None
                 and event.buttons() & QtCore.Qt.LeftButton
                 and (event.pos() - self._drag_start).manhattanLength() > 8):
             self._did_drag = True
+            self._screen.hide_zoom_hint()
             self._do_drag(event.pos())
+        elif not event.buttons():
+            if self._in_thumb_area(event.pos()):
+                self._screen.move_zoom_hint(self.mapToGlobal(event.pos()))
+            else:
+                self._screen.hide_zoom_hint()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._ctrl_zoom_press and event.button() == QtCore.Qt.LeftButton:
+            # Preview stays open — closing it is handled globally by a click
+            # outside its bounds (ScreenMergeMulti.eventFilter), not by release.
+            self._ctrl_zoom_press = False
+            if self._in_thumb_area(event.pos()):
+                self._screen.show_zoom_hint(self.mapToGlobal(event.pos()))
+            super().mouseReleaseEvent(event)
+            return
         if event.button() == QtCore.Qt.LeftButton and not self._did_drag:
-            self._screen.toggle_page_group(self._visual_idx)
+            self._screen.add_to_active_group(self._visual_idx)
         elif event.button() == QtCore.Qt.RightButton and not self._did_drag:
-            self._screen.collapse_page_group(self._visual_idx)
+            self._screen.remove_from_group(self._visual_idx)
         self._drag_start = None
         self._did_drag   = False
         super().mouseReleaseEvent(event)
@@ -464,6 +510,180 @@ class DraggableCard(QtWidgets.QFrame):
     def dragLeaveEvent(self, event):
         self._screen.set_drop_indicator(None)
         super().dragLeaveEvent(event)
+
+
+class ZoomHintBubble(QtWidgets.QWidget):
+    """Спливаюча підказка біля курсору: 'Ctrl + клік — збільшити мініатюру'.
+
+    Малює фон/рамку/текст самостійно в paintEvent (як ZoomPreview), а не через
+    QSS + WA_StyledBackground на дочірніх QLabel — той підхід ненадійно
+    перемальовувався на translucent top-level вікні, яке move()-иться щокадру
+    під час стеження за курсором, тож фон іноді просто не встигав намалюватись
+    і лишався сам світлий текст просто над мініатюрою."""
+
+    _KEY  = "Ctrl"
+    _TEXT = "+ клік — збільшити"
+    _PAD_X, _PAD_Y, _GAP = 10, 7, 6
+
+    def __init__(self):
+        super().__init__(None, QtCore.Qt.ToolTip | QtCore.Qt.FramelessWindowHint)
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(QtCore.Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+
+        self._key_font  = _icons.sf_font(10, QtGui.QFont.Bold)
+        self._text_font = _icons.sf_font(11, QtGui.QFont.DemiBold)
+
+        fm_key  = QtGui.QFontMetrics(self._key_font)
+        fm_text = QtGui.QFontMetrics(self._text_font)
+        self._key_rect = fm_key.boundingRect(self._KEY).adjusted(-6, -3, 6, 3)
+        text_w  = fm_text.horizontalAdvance(self._TEXT)
+        row_h   = max(self._key_rect.height(), fm_text.height())
+
+        w = self._PAD_X + self._key_rect.width() + self._GAP + text_w + self._PAD_X
+        h = row_h + self._PAD_Y * 2
+        self.resize(w, h)
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        t = THEME_MGR.get()
+
+        # Same palette as the right sidebar (bg_sidebar/bg_border) so the hint
+        # reads as part of the app, not a one-off popup with its own colors.
+        bg = QtGui.QColor(t.bg_sidebar)
+        bg.setAlpha(248)
+        border = QtGui.QColor(t.bg_border)
+        border.setAlpha(255)
+        p.setPen(QtGui.QPen(border, 1.2))
+        p.setBrush(bg)
+        p.drawRoundedRect(rect, 8.0, 8.0)
+
+        label_color = QtGui.QColor(t.nav_label_active_color)
+
+        cy = self.height() / 2.0
+        key_r = QtCore.QRectF(self._PAD_X, cy - self._key_rect.height() / 2.0,
+                              self._key_rect.width(), self._key_rect.height())
+        p.setPen(QtCore.Qt.NoPen)
+        key_fill = QtGui.QColor(label_color)
+        key_fill.setAlpha(28)
+        p.setBrush(key_fill)
+        p.drawRoundedRect(key_r, 4.0, 4.0)
+        key_border = QtGui.QColor(label_color)
+        key_border.setAlpha(70)
+        p.setPen(QtGui.QPen(key_border, 1.0))
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawRoundedRect(key_r, 4.0, 4.0)
+
+        key_text = QtGui.QColor(label_color)
+        key_text.setAlpha(t.nav_label_active_alpha)
+        p.setFont(self._key_font)
+        p.setPen(key_text)
+        p.drawText(key_r, QtCore.Qt.AlignCenter, self._KEY)
+
+        text_r = QtCore.QRectF(key_r.right() + self._GAP, 0,
+                               self.width() - key_r.right() - self._GAP - self._PAD_X,
+                               self.height())
+        text_color = QtGui.QColor(label_color)
+        text_color.setAlpha(t.nav_label_active_alpha)
+        p.setFont(self._text_font)
+        p.setPen(text_color)
+        p.drawText(text_r, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, self._TEXT)
+        p.end()
+
+    _OFFSET = 18, 20
+
+    def show_near(self, global_pos: QtCore.QPoint):
+        ox, oy = self._OFFSET
+        x, y = global_pos.x() + ox, global_pos.y() + oy
+        screen = QtGui.QGuiApplication.screenAt(global_pos) or QtGui.QGuiApplication.primaryScreen()
+        if screen:
+            geo = screen.availableGeometry()
+            # Flip to the opposite side of the cursor when the default placement
+            # would push the bubble past the screen edge — plain clamping keeps
+            # the cursor-relative offset, so near a corner the cursor (and its
+            # OS pointer icon) ends up sitting on top of part of the text instead
+            # of beside it. Flipping keeps the whole phrase clear of the cursor.
+            if x + self.width() > geo.right():
+                x = global_pos.x() - ox - self.width()
+            if y + self.height() > geo.bottom():
+                y = global_pos.y() - oy - self.height()
+            x = max(geo.left(), min(x, geo.right()  - self.width()))
+            y = max(geo.top(),  min(y, geo.bottom() - self.height()))
+        self.move(x, y)
+        self.show()
+        self.raise_()
+
+
+class ZoomPreview(QtWidgets.QWidget):
+    """Спливаюче збільшене прев'ю сторінки — показується під час утримання
+    ctrl+ліва кнопка миші на мініатюрі.
+
+    Caller creates a fresh instance per show and discards it on hide/close —
+    a same-size, same-position re-show of a translucent top-level
+    (WA_TranslucentBackground + Qt.ToolTip) window does not reliably get its
+    Windows layered-window compositor surface refreshed by
+    update()/repaint()/hide()+show() alone on a reused instance, since most
+    pages in a document share the same dimensions."""
+
+    def __init__(self):
+        super().__init__(None, QtCore.Qt.ToolTip | QtCore.Qt.FramelessWindowHint)
+        self.setObjectName("zoom_preview")
+        # NOT transparent for mouse events: a click landing on the preview
+        # must be swallowed here (see mousePressEvent) rather than falling
+        # through to whatever thumbnail/widget happens to sit underneath it —
+        # clicking the preview itself should never trigger an action there.
+        self.setAttribute(QtCore.Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self._pixmap = None
+
+        shadow = QtWidgets.QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(40)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QtGui.QColor(0, 0, 0, 160))
+        self.setGraphicsEffect(shadow)
+
+    def mousePressEvent(self, event):
+        # Clicking the preview keeps it open — only a click elsewhere closes
+        # it (ScreenMergeMulti's global event filter).
+        event.accept()
+
+    def show_pixmap(self, pixmap: QtGui.QPixmap, target_w: int, target_h: int,
+                     global_pos: QtCore.QPoint):
+        self._pixmap = pixmap.scaled(
+            target_w, target_h, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
+        )
+        self.resize(self._pixmap.size())
+        self.move_near(global_pos)
+        self.show()
+        self.raise_()
+
+    def move_near(self, global_pos: QtCore.QPoint):
+        x = global_pos.x() - self.width()  // 2
+        y = global_pos.y() - self.height() // 2
+        screen = QtGui.QGuiApplication.screenAt(global_pos) or QtGui.QGuiApplication.primaryScreen()
+        if screen:
+            geo = screen.availableGeometry()
+            x = max(geo.left() + 8, min(x, geo.right()  - self.width()  - 8))
+            y = max(geo.top()  + 8, min(y, geo.bottom() - self.height() - 8))
+        self.move(x, y)
+
+    def paintEvent(self, event):
+        if not self._pixmap:
+            return
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        rect = QtCore.QRectF(self.rect())
+        clip = QtGui.QPainterPath()
+        clip.addRoundedRect(rect, 8.0, 8.0)
+        p.setClipPath(clip)
+        p.drawPixmap(self.rect(), self._pixmap)
+        p.setClipping(False)
+        p.setPen(QtGui.QPen(QtGui.QColor(120, 140, 255, 200), 2.0))
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 8.0, 8.0)
+        p.end()
 
     def dropEvent(self, event):
         if event.mimeData().hasText():
